@@ -1,7 +1,7 @@
 # =============================================================================
 # Qwen3-14B-GGUF Q5_K_XL
 # Modal L4 + llama.cpp + Gradio 5.4
-# Stable Version
+# Stable Version (Fixed)
 # =============================================================================
 
 
@@ -43,10 +43,14 @@ image = (
         "requests"
     )
 
+    # FIX: use the cu124 wheel to match the cuda:12.4.1 base image.
+    # Mismatched CUDA wheel/runtime versions can cause the model load
+    # inside @modal.enter() to crash silently, which means the container
+    # never comes up and Gradio never gets a chance to load.
     .pip_install(
         "llama-cpp-python",
         extra_index_url=
-        "https://abetlen.github.io/llama-cpp-python/whl/cu121"
+        "https://abetlen.github.io/llama-cpp-python/whl/cu124"
     )
 )
 
@@ -127,7 +131,10 @@ app = modal.App(
 # =============================================================================
 
 
-
+# FIX: allow the container to handle several requests at once.
+# Without this, Modal serializes every incoming request (HTML, JS/CSS,
+# the Gradio websocket, etc.), so the page hangs on load even though
+# nothing is actually broken.
 @app.cls(
 
     gpu="L4",
@@ -146,8 +153,7 @@ app = modal.App(
     max_containers=1
 
 )
-
-
+@modal.concurrent(max_inputs=10)
 class Qwen3Service:
 
 
@@ -192,7 +198,12 @@ class Qwen3Service:
     # =========================================================================
 
 
-    async def chat(
+    # FIX: plain generator instead of `async def` + blocking sync call.
+    # llama-cpp's create_chat_completion() is fully synchronous, so wrapping
+    # it in `async def` gains nothing and risks blocking the event loop
+    # under concurrent requests. A normal generator is what Gradio expects
+    # for streaming and is more predictable here.
+    def chat(
 
         self,
 
@@ -270,64 +281,83 @@ class Qwen3Service:
 
 
 
-        stream = self.llm.create_chat_completion(
+        try:
+
+            stream = self.llm.create_chat_completion(
 
 
-            messages=messages,
+                messages=messages,
 
 
-            max_tokens=4096,
+                max_tokens=4096,
 
 
-            temperature=0.7,
+                temperature=0.7,
 
 
-            top_p=0.8,
+                top_p=0.8,
 
 
-            top_k=20,
+                top_k=20,
 
 
-            repeat_penalty=1.1,
+                min_p=0,
 
 
-            stream=True
-
-        )
+                repeat_penalty=1.1,
 
 
-
-        output=""
-
-
-
-        for chunk in stream:
-
-
-            delta = (
-
-                chunk["choices"][0]
-                ["delta"]
+                stream=True
 
             )
 
 
-            text = delta.get(
 
-                "content",
-
-                ""
-
-            )
+            output=""
 
 
-            if text:
+
+            for chunk in stream:
 
 
-                output += text
+                delta = (
+
+                    chunk["choices"][0]
+                    ["delta"]
+
+                )
 
 
-                yield output
+                text = delta.get(
+
+                    "content",
+
+                    ""
+
+                )
+
+
+                if text:
+
+
+                    output += text
+
+
+                    # FIX: strip any stray <think>...</think> block just in
+                    # case the template still emits an (empty or non-empty)
+                    # think block per the README's note on enable_thinking.
+                    cleaned = output
+
+                    if "<think>" in cleaned:
+
+                        cleaned = cleaned.split("</think>")[-1].lstrip("\n")
+
+
+                    yield cleaned
+
+        except Exception as e:
+
+            yield f"生成时出错：{e}"
 
 
 
