@@ -82,7 +82,7 @@ app = modal.App(name="qwen3-14b-gguf-chat-ui-llamacpp", image=image)
 @app.cls(
     gpu="L4",
     volumes={"/cache": vol},
-    scaledown_window=300,
+    scaledown_window=150,
     timeout=600,
     max_containers=1,
 )
