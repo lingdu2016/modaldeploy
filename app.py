@@ -51,7 +51,7 @@ app = modal.App(
 # =============================================================================
 
 @app.cls(
-    image=image,  # 已添加 image 配置
+    image=image,
     gpu="L4",
     volumes={
         "/cache": vol
@@ -84,11 +84,9 @@ class ModelService:
 
         self.llm = Llama(
             model_path=model_path,
-            # L4 全GPU
             n_gpu_layers=-1,
-            # 32k上下文
             n_ctx=32768,
-            # 使用GGUF自己的模板
+            chat_format="chatml",
             verbose=False,
         )
 
@@ -101,48 +99,32 @@ class ModelService:
     ):
         import asyncio
         import queue
+        import re
         import threading
 
-        # ============================
-        # 限制历史长度
-        # ============================
         history = history[-10:]
 
-        # ============================
-        # system prompt
-        # ============================
         messages = [
             {
                 "role": "system",
-                "content": """
-你是一个中文AI助手。
+                "content": """你是一个中文AI助手。
 
 规则：
-
 1. 默认使用简体中文回答。
 2. 除非用户要求英文，否则不要输出英文。
-3. 可以进行：
-   - 日常聊天
-   - 知识问答
-   - 编程帮助
-   - 长篇小说创作
+3. 可以进行日常聊天、知识问答、编程帮助、长篇小说创作。
 
 小说创作要求：
-
 - 保持人物性格一致。
 - 保持世界观连续。
 - 不重复已经出现的剧情。
 - 注重场景、动作、心理描写。
 - 输出正文，不解释写作过程。
 
-回答要自然，不要模拟用户，也不要生成下一轮对话。
-"""
+回答要自然，不要模拟用户，也不要生成下一轮对话。"""
             }
         ]
 
-        # ============================
-        # 添加历史
-        # ============================
         for turn in history:
             if (
                 isinstance(turn, dict)
@@ -171,12 +153,11 @@ class ModelService:
                     self.llm
                     .create_chat_completion(
                         messages=messages,
-                        # 聊天+小说平衡
                         max_tokens=16384,
-                        temperature=0.75,
+                        temperature=0.6,
                         top_p=0.9,
                         min_p=0.05,
-                        repeat_penalty=1.18,
+                        repeat_penalty=1.15,
                         stream=True,
                         stop=[
                             "<|im_end|>",
@@ -209,7 +190,10 @@ class ModelService:
         thread.start()
 
         loop = asyncio.get_event_loop()
-        output = ""
+        
+        raw_accumulator = ""
+        has_passed_think = False
+        display_output = ""
 
         while True:
             item = await loop.run_in_executor(
@@ -223,8 +207,35 @@ class ModelService:
             if isinstance(item, Exception):
                 raise item
 
-            output += item
-            yield output
+            if not has_passed_think:
+                raw_accumulator += item
+                
+                # 场景 1：如果存在标准的 </think> 结束标签
+                if "</think>" in raw_accumulator:
+                    has_passed_think = True
+                    display_output = raw_accumulator.split("</think>", 1)[1].lstrip()
+                    if display_output:
+                        yield display_output
+                else:
+                    # 场景 2：拦截英文思考文本，找到真正的中文回答起点
+                    chinese_match = re.search(r'[\u4e00-\u9fa5]{2,}', raw_accumulator)
+                    is_thinking_prefix = any(
+                        raw_accumulator.lstrip().startswith(prefix)
+                        for prefix in ["<think>", "Here", "Analyze", "Drafting", "Message", "Output"]
+                    )
+                    
+                    if chinese_match and is_thinking_prefix:
+                        start_idx = chinese_match.start()
+                        has_passed_think = True
+                        display_output = raw_accumulator[start_idx:]
+                        yield display_output
+                    elif not is_thinking_prefix and len(raw_accumulator) > 50:
+                        has_passed_think = True
+                        display_output = raw_accumulator
+                        yield display_output
+            else:
+                display_output += item
+                yield display_output
 
     # =========================================================================
     # Gradio
