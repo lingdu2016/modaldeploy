@@ -1,15 +1,15 @@
 # =============================================================================
 # Qwen3.6-14B-A3B-FableVibes-GGUF
 # Modal L4 + llama.cpp + Gradio
-# 最终优化版：无英文泄露、无死循环、无中英混杂、无前端重复
+# 最终优化版：纯中文增量输出 + 依赖修复
 # =============================================================================
 
 import os
 import re
-import modal
 import queue
 import threading
 import asyncio
+import modal
 
 # =============================================================================
 # 模型配置
@@ -18,7 +18,7 @@ MODEL_REPO = "tvall43/Qwen3.6-14B-A3B-FableVibes-GGUF"
 MODEL_FILE = "Qwen3.6-14B-A3B-FableVibes-Q4_K_M.gguf"
 
 # =============================================================================
-# 环境镜像
+# 环境镜像 (确保所有 Python 依赖正确安装在镜像中)
 # =============================================================================
 image = (
     modal.Image.from_registry(
@@ -29,7 +29,7 @@ image = (
     .pip_install(
         "fastapi",
         "gradio==5.4.0",
-        "huggingface_hub>=0.23.0,<0.26.0",
+        "huggingface_hub",  # 移除了版本限制，避免包冲突
         "requests",
     )
     .pip_install(
@@ -39,15 +39,16 @@ image = (
 )
 
 # =============================================================================
-# 模型缓存卷
+# 模型缓存卷 & Modal App
 # =============================================================================
 vol = modal.Volume.from_name("qwen36-14b-cache", create_if_missing=True)
 app = modal.App(name="qwen36-14b-fable-gradio")
 
 # =============================================================================
-# 模型服务类
+# 模型服务类 (确保声明 image=image)
 # =============================================================================
 @app.cls(
+    image=image,  # <-- 必须显式传入绑定的镜像，否则容器找不到已安装的依赖
     gpu="L4",
     volumes={"/cache": vol},
     scaledown_window=300,
@@ -89,7 +90,6 @@ class ModelService:
         """
         history = history[-10:]
 
-        # ---- 正面引导型 System Prompt ----
         system_prompt = """
 你是专精于简体中文创作的作家。
 你的全部输出必须用流畅、地道的中文直接呈现，不要添加任何注释、分析、括号说明或推理过程。
@@ -104,7 +104,6 @@ class ModelService:
 
         messages.append({"role": "user", "content": message})
 
-        # ---- 用于流式传输的队列和同步原语 ----
         result_queue = queue.Queue()
         END = object()
         stop_event = threading.Event()
@@ -125,9 +124,7 @@ class ModelService:
                     mirostat_tau=5.0,
                     mirostat_eta=0.1,
                     top_k=40,
-                    # logit_bias={},   # 可按需添加
                     stream=True,
-                    # 仅保留必要的停止词，移除所有英文短语
                     stop=[
                         "<|im_end|>",
                         "<|endoftext|>",
@@ -154,14 +151,12 @@ class ModelService:
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
 
-        # ---- 主循环：增量输出 + 连续双字中文检测 ----
         loop = asyncio.get_event_loop()
-        output = ""                     # 累积所有文本（包括英文前缀）
-        last_yield_len = 0              # 已 yield 的字符数（用于增量）
-        chinese_start = -1              # 第一个连续中文的起始索引
-        MAX_PREFIX_LEN = 80             # 未出现中文时的最大容忍长度
+        output = ""                     
+        last_yield_len = 0              
+        chinese_start = -1              
+        MAX_PREFIX_LEN = 80             
 
-        # 使用正则检测连续两个及以上中文字符
         chinese_pattern = re.compile(r'[\u4e00-\u9fa5]{2,}')
 
         while True:
@@ -174,31 +169,24 @@ class ModelService:
 
             output += item
 
-            # ---- 如果尚未找到正文起始点 ----
             if chinese_start == -1:
                 match = chinese_pattern.search(output)
                 if match:
                     chinese_start = match.start()
-                    # 从第一个连续中文开始输出（之前的英文前缀全部丢弃）
                     clean_output = output[chinese_start:]
-                    # 增量输出（此时上次输出长度为0，所以会输出全部 clean_output）
                     yield clean_output
                     last_yield_len = len(clean_output)
                 else:
-                    # 仍未出现连续中文，检查是否超长
                     if len(output) > MAX_PREFIX_LEN:
                         stop_event.set()
                         yield "抱歉，生成过程中出现了技术问题，请重新提问。"
                         return
-                    # 否则继续等待，此时不 yield 任何内容
             else:
-                # ---- 已找到正文起点：增量输出新增部分 ----
-                current_full = output[chinese_start:]   # 正文部分（可能还在增长）
+                current_full = output[chinese_start:]   
                 if len(current_full) > last_yield_len:
                     new_part = current_full[last_yield_len:]
                     yield new_part
                     last_yield_len = len(current_full)
-                # 如果长度未变，则无新内容，继续循环
 
     # -------------------------------------------------------------------------
     # Gradio UI
@@ -230,4 +218,4 @@ class ModelService:
 @app.local_entrypoint()
 def main():
     print("部署完成")
-    print("执行: modal deploy llama.py")
+    print("执行部署: modal deploy app.py")
