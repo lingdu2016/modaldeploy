@@ -33,4 +33,5 @@ jobs:
       - name: Deploy Modal App
         run: |
           # 将 app.py 替换为你实际的入口文件模块路径
-          modal deploy app.py
+          #modal deploy app.py
+          modal deploy llama.py
