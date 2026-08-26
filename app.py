@@ -1,7 +1,7 @@
 # =============================================================================
 # Qwen3.6-14B-A3B-FableVibes-GGUF
 # Modal L4 + llama.cpp + Gradio
-# 最终优化版：纯中文增量输出 + 依赖修复
+# 最终修复版：锁死依赖版本，解决 Gradio 初始化崩塌
 # =============================================================================
 
 import os
@@ -18,7 +18,7 @@ MODEL_REPO = "tvall43/Qwen3.6-14B-A3B-FableVibes-GGUF"
 MODEL_FILE = "Qwen3.6-14B-A3B-FableVibes-Q4_K_M.gguf"
 
 # =============================================================================
-# 环境镜像 (确保所有 Python 依赖正确安装在镜像中)
+# 环境镜像 (严格锁死相互兼容的包版本)
 # =============================================================================
 image = (
     modal.Image.from_registry(
@@ -29,7 +29,7 @@ image = (
     .pip_install(
         "fastapi",
         "gradio==5.4.0",
-        "huggingface_hub",  # 移除了版本限制，避免包冲突
+        "huggingface_hub==0.25.2",  # 关键修复：锁死在 0.25.2，防止高版本移除 HfFolder
         "requests",
     )
     .pip_install(
@@ -45,10 +45,10 @@ vol = modal.Volume.from_name("qwen36-14b-cache", create_if_missing=True)
 app = modal.App(name="qwen36-14b-fable-gradio")
 
 # =============================================================================
-# 模型服务类 (确保声明 image=image)
+# 模型服务类
 # =============================================================================
 @app.cls(
-    image=image,  # <-- 必须显式传入绑定的镜像，否则容器找不到已安装的依赖
+    image=image,
     gpu="L4",
     volumes={"/cache": vol},
     scaledown_window=300,
@@ -82,12 +82,9 @@ class ModelService:
         print("模型加载完成")
 
     # -------------------------------------------------------------------------
-    # 预测接口（流式）
+    # 预测接口（流式增量输出）
     # -------------------------------------------------------------------------
     async def predict(self, message, history):
-        """
-        流式生成回答，内置“连续双字中文检测 + 增量输出 + 超时截断”。
-        """
         history = history[-10:]
 
         system_prompt = """
@@ -206,7 +203,7 @@ class ModelService:
             fn=chat,
             type="messages",
             title="Qwen3.6-14B 中文聊天 + 小说助手",
-            description="Modal L4 + llama.cpp（最终优化版：纯中文增量输出）"
+            description="Modal L4 + llama.cpp"
         )
 
         demo.queue(default_concurrency_limit=1)
