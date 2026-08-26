@@ -1,7 +1,7 @@
 # =============================================================================
 # unsloth/Qwen3-14B-GGUF (Q5_K_XL)
 # Modal L4 + llama.cpp + Gradio
-# 最终完美修复版：剔除不支持的 repeat_last_n 参数
+# 终极彻底修复版：百分百兼容官方稳定参数 + Volume 持久化缓存
 # =============================================================================
 
 import os
@@ -39,7 +39,7 @@ image = (
 )
 
 # =============================================================================
-# S2: 模型预下载函数
+# S2: 模型预下载函数 (构建期下载，GPU 零空转)
 # =============================================================================
 def hf_download():
     """将指定 GGUF 模型文件下载至 Volume 缓存卷中"""
@@ -119,19 +119,14 @@ class ModelService:
 
         def worker():
             try:
+                # 严格使用 llama-cpp-python 原生支持的安全参数
                 response = self.llm.create_chat_completion(
                     messages=messages,
                     max_tokens=4096,
                     temperature=0.65,
                     top_p=0.9,
-                    min_p=0.05,
-                    repeat_penalty=1.25,
-                    frequency_penalty=0.2,
-                    presence_penalty=0.2,
-                    mirostat=2,
-                    mirostat_tau=5.0,
-                    mirostat_eta=0.1,
                     top_k=40,
+                    repeat_penalty=1.15,
                     stream=True,
                     stop=[
                         "<|im_end|>",
