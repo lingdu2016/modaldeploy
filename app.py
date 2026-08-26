@@ -103,15 +103,13 @@ class ModelService:
 
         history = history[-10:]
 
+        # 极简提示词：删除了所有条件判定，防止模型进入逻辑死循环
         messages = [
             {
                 "role": "system",
-                "content": """你是一个优秀的中文 AI 助手。
-
-【回答指南】
-1. 始终使用地道、自然、流畅的简体中文回答问题。
-2. 当被问及身份时，简洁告知：我是基于 Qwen 架构微调的 AI 助手。
-3. 对话保持自然体贴，直接输出最终回答正文即可。"""
+                "content": """你是一个优秀的中文 AI 助手（基于 Qwen 架构）。
+请直接用流畅、地道的简体中文回答问题。
+严禁在输出中包含任何自我纠错（如 Wait, Let me re-read）、计划草稿或英文内部思考，直接输出最终的中文正文即可。"""
             }
         ]
 
@@ -185,13 +183,6 @@ class ModelService:
         has_passed_think = False
         display_output = ""
 
-        # 扩充英文思考链拦截前缀词库
-        thinking_prefixes = (
-            "<think>", "here", "analyze", "drafting", "message", "output", 
-            "the user", "thought", "identify", "language", "self-correction", 
-            "refining", "final", "correcting", "polishing"
-        )
-
         while True:
             item = await loop.run_in_executor(
                 None,
@@ -207,24 +198,33 @@ class ModelService:
             if not has_passed_think:
                 raw_accumulator += item
                 
-                # 场景 1：含有标准的 </think> 结束标记
+                # 场景 1：如果存在标准的 </think> 结束标签
                 if "</think>" in raw_accumulator:
                     has_passed_think = True
                     display_output = raw_accumulator.split("</think>", 1)[1].lstrip()
                     if display_output:
                         yield display_output
                 else:
-                    # 场景 2：通过正则表达式寻找连续两个汉字，同时过滤英文思考前缀
+                    # 场景 2：“认字拦截法”——寻找连续的两个中文字符作为正文的真实起点
                     chinese_match = re.search(r'[\u4e00-\u9fa5]{2,}', raw_accumulator)
-                    acc_lower = raw_accumulator.lstrip().lower()
-                    is_thinking_prefix = any(acc_lower.startswith(prefix) for prefix in thinking_prefixes)
                     
-                    if chinese_match and is_thinking_prefix:
+                    if chinese_match:
                         start_idx = chinese_match.start()
-                        has_passed_think = True
-                        display_output = raw_accumulator[start_idx:]
-                        yield display_output
-                    elif not is_thinking_prefix and len(raw_accumulator) > 50:
+                        prefix = raw_accumulator[:start_idx]
+                        
+                        # 核心判断：如果中文开始前的“前缀”里包含了英文单词(>=3个字母组合)，
+                        # 说明前面的部分全是模型偷偷思考的英文草稿，予以果断抛弃。
+                        if bool(re.search(r'[a-zA-Z]{3,}', prefix)):
+                            has_passed_think = True
+                            display_output = raw_accumulator[start_idx:]
+                            yield display_output
+                        else:
+                            # 如果前缀非常干净（只有空格或换行），则是正常的中文开头
+                            has_passed_think = True
+                            display_output = raw_accumulator
+                            yield display_output
+                    # 如果积累了 300 个字符还没见到中文，兜底放行（防止死循环撑爆内存或者用户本身要求写英文）
+                    elif len(raw_accumulator) > 300:
                         has_passed_think = True
                         display_output = raw_accumulator
                         yield display_output
