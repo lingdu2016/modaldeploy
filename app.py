@@ -1,26 +1,16 @@
 # =============================================================================
 # Qwen3.6-14B-A3B-FableVibes-GGUF
-# Modal L4 + llama.cpp + OpenAI API
-# Personal Novel Assistant
+# Modal L4 + llama.cpp + Gradio
+# 聊天 + 长篇小说生成版
 # =============================================================================
 
-import os
-import json
 
+import os
 import modal
 
 
-# =============================================================================
-# 模型配置
-# =============================================================================
-
 MODEL_REPO = "tvall43/Qwen3.6-14B-A3B-FableVibes-GGUF"
-
-MODEL_FILE = (
-    "Qwen3.6-14B-A3B-FableVibes-Q4_K_M.gguf"
-)
-
-MODEL_NAME = "qwen3.6-14b"
+MODEL_FILE = "Qwen3.6-14B-A3B-FableVibes-Q4_K_M.gguf"
 
 
 # =============================================================================
@@ -39,27 +29,27 @@ image = (
     )
     .pip_install(
         "fastapi",
-        "uvicorn",
-        "huggingface_hub>=0.23.0",
+        "gradio==5.4.0",
+        "huggingface_hub>=0.23.0,<0.26.0",
+        "requests",
+    )
+    .pip_install(
         "llama-cpp-python",
-        extra_index_url=
-        "https://abetlen.github.io/llama-cpp-python/whl/cu121"
+        extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu121",
     )
 )
 
 
-# =============================================================================
-# Modal
-# =============================================================================
+# 模型缓存
 
-app = modal.App(
-    "qwen36-14b-personal-api"
+vol = modal.Volume.from_name(
+    "qwen36-14b-cache",
+    create_if_missing=True
 )
 
 
-volume = modal.Volume.from_name(
-    "qwen36-14b-model-cache",
-    create_if_missing=True
+app = modal.App(
+    name="qwen36-14b-fable-gradio"
 )
 
 
@@ -67,47 +57,53 @@ volume = modal.Volume.from_name(
 # 模型服务
 # =============================================================================
 
+
 @app.cls(
-    image=image,
     gpu="L4",
     volumes={
-        "/models": volume
+        "/cache": vol
     },
-    timeout=900,
     scaledown_window=300,
-    max_containers=1
+    timeout=600,
+    max_containers=1,
 )
-class Model:
+
+
+@modal.concurrent(max_inputs=20)
+
+class ModelService:
+
 
     @modal.enter()
-    def load(self):
+    def load_model(self):
 
         from huggingface_hub import hf_hub_download
         from llama_cpp import Llama
 
 
-        model_path = (
-            f"/models/{MODEL_FILE}"
-        )
+        self.lock = None
+
+
+        model_path = f"/cache/{MODEL_FILE}"
 
 
         if not os.path.exists(model_path):
 
             print(
-                "Downloading model..."
+                f"下载模型: {MODEL_FILE}"
             )
 
             hf_hub_download(
                 repo_id=MODEL_REPO,
                 filename=MODEL_FILE,
-                local_dir="/models"
+                local_dir="/cache"
             )
 
-            volume.commit()
+            vol.commit()
 
 
         print(
-            "Loading llama.cpp..."
+            "加载 llama.cpp ..."
         )
 
 
@@ -115,190 +111,188 @@ class Model:
 
             model_path=model_path,
 
-            # L4全部GPU
+            # L4 全GPU
             n_gpu_layers=-1,
 
-            # 小说上下文
+            # 32k上下文
             n_ctx=32768,
 
-            verbose=False
 
+            # 使用GGUF自己的模板
+            verbose=False,
         )
 
 
         print(
-            "Model ready"
+            "模型加载完成"
         )
 
 
 
-    def generate(
+    async def predict(
         self,
-        messages,
-        stream=False
+        message,
+        history
     ):
 
 
-        system = {
+        import asyncio
+        import queue
+        import threading
 
-            "role":
-            "system",
 
-            "content":
-            """
+        # ============================
+        # 限制历史长度
+        # ============================
+
+        history = history[-10:]
+
+
+        # ============================
+        # system prompt
+        # ============================
+
+
+        messages = [
+
+            {
+                "role":"system",
+
+                "content":
+"""
 你是一个中文AI助手。
 
-要求：
+规则：
 
-1. 默认使用简体中文。
-2. 可以聊天、编程、知识问答。
-3. 擅长长篇小说创作。
+1. 默认使用简体中文回答。
+2. 除非用户要求英文，否则不要输出英文。
+3. 可以进行：
+   - 日常聊天
+   - 知识问答
+   - 编程帮助
+   - 长篇小说创作
 
-
-小说规则：
+小说创作要求：
 
 - 保持人物性格一致。
 - 保持世界观连续。
-- 不重复已经发生剧情。
-- 加强环境、动作、心理描写。
+- 不重复已经出现的剧情。
+- 注重场景、动作、心理描写。
 - 输出正文，不解释写作过程。
 
-不要模拟用户。
+回答要自然，不要模拟用户，也不要生成下一轮对话。
 """
-        }
+            }
 
-
-        final_messages = [
-            system
         ]
 
 
-        for m in messages:
 
-            if m.get("role") != "system":
-
-                final_messages.append(m)
-
+        # ============================
+        # 添加历史
+        # ============================
 
 
-        return self.llm.create_chat_completion(
+        for turn in history:
 
-            messages=final_messages,
+            if (
+                isinstance(turn, dict)
+                and
+                isinstance(turn.get("content"), str)
+            ):
 
-            max_tokens=4096,
+                messages.append(
+                    {
+                        "role":
+                            turn["role"],
 
-            temperature=0.75,
+                        "content":
+                            turn["content"]
+                    }
+                )
 
-            top_p=0.9,
 
-            repeat_penalty=1.15,
+        messages.append(
 
-            stream=stream
+            {
+                "role":"user",
+
+                "content":message
+            }
+
         )
 
 
 
-# =============================================================================
-# OpenAI API
-# =============================================================================
+        result_queue = queue.Queue()
 
-@app.function(
-    image=image,
-    timeout=900
-)
-@modal.web_server(
-    port=8000,
-    startup_timeout=900
-)
-def web():
-
-    from fastapi import FastAPI, Request
-    from fastapi.responses import StreamingResponse
-
-
-    api = FastAPI()
-
-
-    model = Model()
+        END = object()
 
 
 
-    @api.get("/health")
-    async def health():
-
-        return {
-            "status":"ok",
-            "model":MODEL_NAME
-        }
+        def worker():
 
 
+            try:
 
-    @api.get("/v1/models")
-    async def models():
+                response = (
+                    self.llm
+                    .create_chat_completion(
 
-        return {
-
-            "object":"list",
-
-            "data":[
-
-                {
-                    "id":MODEL_NAME,
-                    "object":"model"
-                }
-
-            ]
-
-        }
+                        messages=messages,
 
 
-
-    @api.post("/v1/chat/completions")
-    async def chat(
-        request:Request
-    ):
+                        # 聊天+小说平衡
+                        max_tokens=4096,
 
 
-        body = await request.json()
+                        temperature=0.75,
 
 
-        messages = body.get(
-            "messages",
-            []
-        )
+                        top_p=0.9,
 
 
-        stream = body.get(
-            "stream",
-            False
-        )
+                        min_p=0.05,
 
 
-        result = model.generate(
-            messages,
-            stream
-        )
+                        repeat_penalty=1.18,
+
+
+                        stream=True,
+
+
+                        stop=[
+
+                            "<|im_end|>",
+
+                            "<|endoftext|>",
+
+                            "<|eot_id|>",
+
+                            "User:",
+
+                            "用户:",
+
+                        ]
+
+                    )
+                )
 
 
 
-        if stream:
+                for chunk in response:
 
-
-            async def event():
-
-                for chunk in result:
 
                     delta = (
                         chunk
                         ["choices"]
                         [0]
-                        .get(
-                            "delta",
-                            {}
-                        )
+                        .get("delta", {})
                     )
 
 
+                    # 重点:
+                    # 不读取 reasoning_content
                     text = delta.get(
                         "content"
                     )
@@ -306,101 +300,158 @@ def web():
 
                     if text:
 
-                        data = {
-
-                            "choices":[
-
-                                {
-                                    "delta":{
-                                        "content":text
-                                    }
-                                }
-
-                            ]
-
-                        }
-
-
-                        yield (
-                            "data: "
-                            +
-                            json.dumps(
-                                data,
-                                ensure_ascii=False
-                            )
-                            +
-                            "\n\n"
+                        result_queue.put(
+                            text
                         )
 
 
-                yield "data: [DONE]\n\n"
+            except Exception as e:
+
+                result_queue.put(e)
+
+
+            finally:
+
+                result_queue.put(
+                    END
+                )
 
 
 
-            return StreamingResponse(
+        thread = threading.Thread(
+            target=worker,
+            daemon=True
+        )
 
-                event(),
+        thread.start()
 
-                media_type=
-                "text/event-stream"
+
+
+        loop = asyncio.get_event_loop()
+
+
+        output = ""
+
+
+
+        while True:
+
+
+            item = await loop.run_in_executor(
+
+                None,
+
+                result_queue.get
 
             )
 
 
+            if item is END:
 
-        else:
-
-
-            text = (
-
-                result
-                ["choices"]
-                [0]
-                ["message"]
-                ["content"]
-
-            )
-
-
-            return {
-
-                "id":
-                "chatcmpl-qwen",
-
-                "object":
-                "chat.completion",
-
-                "model":
-                MODEL_NAME,
-
-
-                "choices":[
-
-                    {
-
-                        "index":0,
-
-                        "message":
-
-                        {
-
-                            "role":
-                            "assistant",
-
-                            "content":
-                            text
-
-                        },
-
-                        "finish_reason":
-                        "stop"
-
-                    }
-
-                ]
-
-            }
+                break
 
 
 
-    return api
+            if isinstance(
+                item,
+                Exception
+            ):
+
+                raise item
+
+
+
+            output += item
+
+
+            yield output
+
+
+
+    # =========================================================================
+    # Gradio
+    # =========================================================================
+
+
+    @modal.asgi_app()
+
+    def ui(self):
+
+
+        import gradio as gr
+
+        from fastapi import FastAPI
+
+
+
+        web_app = FastAPI()
+
+
+
+        async def chat(
+            message,
+            history
+        ):
+
+            async for x in self.predict(
+                message,
+                history
+            ):
+
+                yield x
+
+
+
+
+        demo = gr.ChatInterface(
+
+            fn=chat,
+
+
+            type="messages",
+
+
+            title=
+            "Qwen3.6-14B 中文聊天 + 小说助手",
+
+
+            description=
+            "Modal L4 + llama.cpp"
+
+
+        )
+
+
+        demo.queue(
+            default_concurrency_limit=1
+        )
+
+
+        return gr.mount_gradio_app(
+
+            web_app,
+
+            demo,
+
+            path="/"
+
+        )
+
+
+
+# =============================================================================
+# deploy
+# =============================================================================
+
+
+@app.local_entrypoint()
+
+def main():
+
+    print(
+        "部署完成"
+    )
+
+    print(
+        "modal deploy app.py"
+    )
