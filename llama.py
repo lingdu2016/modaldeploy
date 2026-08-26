@@ -1,40 +1,24 @@
+# 作用：在 Modal 云端使用 llama.cpp (GGUF 引擎) 部署 Qwen3-14B-UD-Q5_K_XL + Gradio 聊天室
 # =============================================================================
-# Qwen3-14B-GGUF Q5_K_XL
-# Modal L4 + llama.cpp + Gradio 5.4
-# Stable Version (Fixed)
+# 部署前置步骤:
+#   本模型 (unsloth/Qwen3-14B-GGUF) 为公开仓库，无需 huggingface-secret 即可下载。
+# 部署命令: modal deploy app2.py
 # =============================================================================
-
 
 import modal
 
-
 # =============================================================================
-# Model
+# S1: 环境准备 - 基于 CUDA 12.4 镜像，构建包含 llama-cpp-python 与 fastapi 驱动的环境
 # =============================================================================
-
 MODEL_REPO = "unsloth/Qwen3-14B-GGUF"
-
 MODEL_FILE = "Qwen3-14B-UD-Q5_K_XL.gguf"
-
-
-
-# =============================================================================
-# Image
-# =============================================================================
-
 
 image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
         add_python="3.11"
     )
-
-    .apt_install(
-        "git",
-        "wget",
-        "curl"
-    )
-
+    .apt_install("git", "wget", "curl")
     .pip_install(
         "fastapi",
         "gradio==5.4.0",
@@ -42,186 +26,97 @@ image = (
         "pydantic<3",
         "requests"
     )
-
-    # FIX: use the cu124 wheel to match the cuda:12.4.1 base image.
-    # Mismatched CUDA wheel/runtime versions can cause the model load
-    # inside @modal.enter() to crash silently, which means the container
-    # never comes up and Gradio never gets a chance to load.
+    # FIX: wheel 版本需与基础镜像的 CUDA 版本匹配 (12.4.1 -> cu124)，
+    # 否则可能在 @modal.enter() 加载模型阶段因 CUDA 符号不匹配而崩溃，
+    # 导致容器起不来、Gradio 页面自然也加载不出来。
     .pip_install(
         "llama-cpp-python",
-        extra_index_url=
-        "https://abetlen.github.io/llama-cpp-python/whl/cu124"
+        extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu124"
     )
 )
 
 
-
 # =============================================================================
-# Volume
+# S2: 模型预下载 - 从 Hugging Face 持久化缓存 Qwen3-14B GGUF 权重
 # =============================================================================
-
-
-model_volume = modal.Volume.from_name(
-    "qwen3-14b-cache",
-    create_if_missing=True
-)
-
-
-
-# =============================================================================
-# Download model
-# =============================================================================
-
-
-def download_model():
-
+def hf_download():
+    """预下载 Qwen3-14B-UD-Q5_K_XL 权重文件至持久化缓存卷中"""
     from huggingface_hub import hf_hub_download
 
-
-    print("Downloading model...")
-
+    print(f"📦 开始下载 {MODEL_REPO}/{MODEL_FILE}...")
 
     hf_hub_download(
-
         repo_id=MODEL_REPO,
-
         filename=MODEL_FILE,
-
         local_dir="/cache",
-
-        resume_download=True
-
+        resume_download=True,
     )
 
-
-    print("Model download finished")
-
+    print("🎉 模型预下载成功完成!")
 
 
+# =============================================================================
+# S3: 持久化卷挂载与 App 初始化
+# =============================================================================
+vol = modal.Volume.from_name("qwen3-14b-cache", create_if_missing=True)
 
 image = image.run_function(
-
-    download_model,
-
-    volumes={
-        "/cache": model_volume
-    }
-
+    hf_download,
+    volumes={"/cache": vol},
 )
 
+app = modal.App(name="qwen3-14b-gguf-chat-ui-llamacpp", image=image)
 
 
 # =============================================================================
-# App
+# S4: Gradio Chat Web 服务 (并发锁 + L4 显存安全配置)
 # =============================================================================
-
-
-app = modal.App(
-
-    "qwen3-14b-gradio",
-
-    image=image
-
-)
-
-
-
-# =============================================================================
-# Model Service
-# =============================================================================
-
-
-# FIX: allow the container to handle several requests at once.
-# Without this, Modal serializes every incoming request (HTML, JS/CSS,
-# the Gradio websocket, etc.), so the page hangs on load even though
-# nothing is actually broken.
+# FIX: 加上 @modal.concurrent(max_inputs=10)。
+# Modal 容器默认同一时间只处理一个请求，而 Gradio 页面加载需要同时
+# 发起多个请求 (HTML / 静态资源 / WebSocket 队列)，不加这个会互相
+# 卡住，表现为页面一直转圈加载不出来。
 @app.cls(
-
     gpu="L4",
-
-    volumes={
-        "/cache":model_volume
-    },
-
-
-    timeout=900,
-
-
+    volumes={"/cache": vol},
     scaledown_window=300,
-
-
-    max_containers=1
-
+    timeout=900,
+    max_containers=1,
 )
 @modal.concurrent(max_inputs=10)
-class Qwen3Service:
-
-
+class ModelService:
 
     @modal.enter()
-
     def load_model(self):
-
+        """容器启动时加载 llama.cpp 引擎并初始化并发锁"""
+        import asyncio
         from llama_cpp import Llama
 
+        # 初始化异步锁，用于串行化推理请求，防止并发调用同一个
+        # Llama 实例导致状态错乱或崩溃 (llama.cpp 底层非线程安全)。
+        self.lock = asyncio.Lock()
 
-
-        print("Loading Qwen3...")
-
-
+        print("🚀 正在初始化 llama.cpp 引擎 (单卡 L4 优化配置)...")
 
         self.llm = Llama(
-
-            model_path=
-            f"/cache/{MODEL_FILE}",
-
-
+            model_path=f"/cache/{MODEL_FILE}",
             n_gpu_layers=-1,
-
-
             # L4 24GB
             n_ctx=16384,
-
-
-            verbose=False
-
+            verbose=False,
         )
 
+        print("✅ 模型加载成功！")
 
-        print("Qwen3 loaded")
+    async def predict(self, message: str, history: list):
+        """线程安全的流式推理逻辑"""
+        import asyncio
 
-
-
-
-    # =========================================================================
-    # Chat
-    # =========================================================================
-
-
-    # FIX: plain generator instead of `async def` + blocking sync call.
-    # llama-cpp's create_chat_completion() is fully synchronous, so wrapping
-    # it in `async def` gains nothing and risks blocking the event loop
-    # under concurrent requests. A normal generator is what Gradio expects
-    # for streaming and is more predictable here.
-    def chat(
-
-        self,
-
-        message,
-
-        history
-
-    ):
-
-
-        messages = [
-
-            {
-
-                "role":"system",
-
-                "content":
-"""
+        # 使用异步锁保护 llama.cpp 引擎
+        async with self.lock:
+            messages = [
+                {
+                    "role": "system",
+                    "content": """
 你是一名专业中文小说作者。
 
 要求：
@@ -235,214 +130,75 @@ class Qwen3Service:
 
 /no_think
 """
+                }
+            ]
 
-            }
+            for turn in history:
+                messages.append({"role": turn["role"], "content": turn["content"]})
 
-        ]
-
-
-
-        # Gradio messages format
-
-        for item in history:
-
-
-            if isinstance(item,dict):
-
-                messages.append(
-
-                    {
-
-                        "role":
-                        item["role"],
-
-
-                        "content":
-                        item["content"]
-
-                    }
-
-                )
-
-
-
-        messages.append(
-
-            {
-
-                "role":"user",
-
-                "content":
-                message + "\n/no_think"
-
-            }
-
-        )
-
-
-
-        try:
+            # 追加 /no_think 软开关 (README 中说明的用法)，关闭思考模式
+            messages.append({"role": "user", "content": message + "\n/no_think"})
 
             stream = self.llm.create_chat_completion(
-
-
                 messages=messages,
-
-
-                max_tokens=4096,
-
-
+                max_tokens=8192,
                 temperature=0.7,
-
-
                 top_p=0.8,
-
-
                 top_k=20,
-
-
                 min_p=0,
-
-
                 repeat_penalty=1.1,
-
-
-                stream=True
-
+                stream=True,
             )
 
-
-
-            output=""
-
-
-
+            response = ""
             for chunk in stream:
-
-
-                delta = (
-
-                    chunk["choices"][0]
-                    ["delta"]
-
-                )
-
-
-                text = delta.get(
-
-                    "content",
-
-                    ""
-
-                )
-
+                delta = chunk["choices"][0]["delta"]
+                text = delta.get("content", "")
 
                 if text:
+                    response += text
 
-
-                    output += text
-
-
-                    # FIX: strip any stray <think>...</think> block just in
-                    # case the template still emits an (empty or non-empty)
-                    # think block per the README's note on enable_thinking.
-                    cleaned = output
-
+                    # 防御性清理，防止万一残留 <think>...</think> 泄露到前端
+                    cleaned = response
                     if "<think>" in cleaned:
-
                         cleaned = cleaned.split("</think>")[-1].lstrip("\n")
 
-
                     yield cleaned
-
-        except Exception as e:
-
-            yield f"生成时出错：{e}"
-
-
-
-
-
-    # =========================================================================
-    # Gradio
-    # =========================================================================
-
+                    # 主动让出 asyncio 控制权，允许 FastAPI 及时处理心跳包，防止连接中断
+                    await asyncio.sleep(0)
 
     @modal.asgi_app()
-
     def ui(self):
-
-
+        """通过 FastAPI 挂载 Gradio 并开启 Server-Sent Events (SSE) 队列"""
         import gradio as gr
-
         from fastapi import FastAPI
-
-
 
         web_app = FastAPI()
 
-
+        async def predict_wrapper(message, history):
+            async for output in self.predict(message, history):
+                yield output
 
         demo = gr.ChatInterface(
-
-
-            fn=self.chat,
-
-
+            fn=predict_wrapper,
             type="messages",
-
-
-            title=
-            "Qwen3-14B 中文小说助手",
-
-
-            description=
-"""
-Qwen3-14B-UD-Q5_K_XL
-
-Modal L4 + llama.cpp
-
-支持长篇小说创作
-"""
-
+            title="Qwen3-14B-GGUF Chatbot (Modal + llama.cpp 单卡 L4 版)",
+            description="基于 Modal 云端单卡 L4 与 llama.cpp 引擎部署的流式中文小说创作助手。",
+            textbox=gr.Textbox(placeholder="请输入内容...", container=False, scale=7),
         )
 
+        demo.queue(default_concurrency_limit=5)
 
-
-        demo.queue(
-
-            default_concurrency_limit=5
-
-        )
-
-
-
-        return gr.mount_gradio_app(
-
-            web_app,
-
-            demo,
-
-            path="/"
-
-        )
-
-
+        return gr.mount_gradio_app(web_app, demo, path="/")
 
 
 # =============================================================================
-# Deploy
+# S5: 本地入口点
 # =============================================================================
-
-
 @app.local_entrypoint()
-
 def main():
-
-    print(
-        """
-部署:
-
-modal deploy llama.py
-"""
-    )
+    print("=" * 60)
+    print("Qwen3-14B-GGUF Gradio ChatUI 部署 (llama.cpp 单卡 L4 极速版)")
+    print("=" * 60)
+    print("📌 部署命令: modal deploy app2.py")
+    print("=" * 60)
