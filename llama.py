@@ -114,7 +114,10 @@ class ModelService:
             # 开启 flash attention (如果这版 llama-cpp-python 支持编译时启用的话)，
             # 对 L4 这种 Ada 架构通常能明显提速
             flash_attn=True,
-            verbose=True,  # 先保持 True，确认下面这行 offload 信息
+            # 已确认 GPU 正常识别、模型加载正常，关掉详细 dump 日志，
+            # 减少日志噪音。每次生成后的耗时/速度统计单独用 print
+            # 打印 (见 predict() 里的 worker())，跟这里的 verbose 无关。
+            verbose=False,
         )
 
         print("模型加载完成")
@@ -191,7 +194,7 @@ class ModelService:
                 try:
                     stream = self.llm.create_completion(
                         prompt=prompt,
-                        max_tokens=4096,
+                        max_tokens=8192,
                         temperature=0.75,
                         top_p=0.9,
                         top_k=20,
