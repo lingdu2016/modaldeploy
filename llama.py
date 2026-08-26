@@ -1,7 +1,7 @@
 # =============================================================================
 # unsloth/Qwen3-14B-GGUF (Q5_K_XL)
 # Modal L4 + llama.cpp + Gradio
-# 终极标准版：Volume 持久化缓存 + 构建期下载（GPU 零空转）
+# 最终修正版：正确使用 @modal.asgi_app()
 # =============================================================================
 
 import os
@@ -39,7 +39,7 @@ image = (
 )
 
 # =============================================================================
-# S2: 模型预下载函数（利用 Volume 缓存，杜绝 GPU 启动白烧钱）
+# S2: 模型预下载函数
 # =============================================================================
 def hf_download():
     """将指定 GGUF 模型文件下载至 Volume 缓存卷中"""
@@ -59,7 +59,6 @@ def hf_download():
 # =============================================================================
 vol = modal.Volume.from_name("qwen3-14b-cache", create_if_missing=True)
 
-# 按照标准模式将下载函数、Volume 绑定到镜像构建中
 image = image.run_function(
     hf_download,
     volumes={"/cache": vol}
@@ -199,9 +198,9 @@ class ModelService:
                     last_yield_len = len(current_full)
 
     # -------------------------------------------------------------------------
-    # Gradio UI
+    # Gradio UI (修正为正确的 @modal.asgi_app 装饰器)
     # -------------------------------------------------------------------------
-    @app.asgi_app()
+    @modal.asgi_app()
     def ui(self):
         import gradio as gr
         from fastapi import FastAPI
