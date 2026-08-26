@@ -113,10 +113,13 @@ class ModelService:
 
         # 使用异步锁保护 llama.cpp 引擎
         async with self.lock:
-            messages = [
-                {
-                    "role": "system",
-                    "content": """
+            # FIX: 不再依赖 create_chat_completion() 自动解析 GGUF 内嵌
+            # 的 jinja 对话模板 (这一步在实践中并不总是可靠，模板解析
+            # 出问题时会退化成裸续写，导致"你好"被当成故事开头续写下去，
+            # 表现为输出一大段小说、迟迟停不下来)。
+            # 这里手动拼接完整的 Qwen ChatML 格式 prompt，格式完全由
+            # 我们自己保证正确。
+            system_prompt = """
 你是一名专业中文小说作者。
 
 要求：
@@ -127,43 +130,40 @@ class ModelService:
 4. 直接输出最终答案。
 5. 支持长篇小说创作。
 6. 保持人物和剧情连续。
-
-/no_think
 """
-                }
-            ]
+
+            prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
 
             for turn in history:
-                messages.append({"role": turn["role"], "content": turn["content"]})
+                prompt += f"<|im_start|>{turn['role']}\n{turn['content']}<|im_end|>\n"
 
-            # 追加 /no_think 软开关 (README 中说明的用法)，关闭思考模式
-            messages.append({"role": "user", "content": message + "\n/no_think"})
+            prompt += f"<|im_start|>user\n{message}<|im_end|>\n"
+            # 关键一步：预填空的 think 块，这是 Qwen 官方 /no_think 软
+            # 开关背后真正的实现机制，直接强制关闭思考模式。
+            prompt += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-            stream = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=8192,
+            stream = self.llm.create_completion(
+                prompt=prompt,
+                max_tokens=4096,
                 temperature=0.7,
                 top_p=0.8,
                 top_k=20,
                 min_p=0,
                 repeat_penalty=1.1,
+                # FIX: 必须显式设置停止符！没有它，纯续写模式下模型
+                # 说完这一轮后会继续"演"下一轮对话甚至整篇故事，
+                # 停不下来，看起来就像输出很慢。
+                stop=["<|im_end|>", "<|im_start|>"],
                 stream=True,
             )
 
             response = ""
             for chunk in stream:
-                delta = chunk["choices"][0]["delta"]
-                text = delta.get("content", "")
+                text = chunk["choices"][0]["text"]
 
                 if text:
                     response += text
-
-                    # 防御性清理，防止万一残留 <think>...</think> 泄露到前端
-                    cleaned = response
-                    if "<think>" in cleaned:
-                        cleaned = cleaned.split("</think>")[-1].lstrip("\n")
-
-                    yield cleaned
+                    yield response
                     # 主动让出 asyncio 控制权，允许 FastAPI 及时处理心跳包，防止连接中断
                     await asyncio.sleep(0)
 
