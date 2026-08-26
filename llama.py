@@ -1,7 +1,7 @@
 # =============================================================================
 # unsloth/Qwen3-14B-GGUF (Q5_K_XL)
 # Modal L4 + llama.cpp + Gradio
-# 最终修正版：正确使用 @modal.asgi_app()
+# 最终完美修复版：剔除不支持的 repeat_last_n 参数
 # =============================================================================
 
 import os
@@ -121,12 +121,11 @@ class ModelService:
             try:
                 response = self.llm.create_chat_completion(
                     messages=messages,
-                    max_tokens=8192,
+                    max_tokens=4096,
                     temperature=0.65,
                     top_p=0.9,
                     min_p=0.05,
                     repeat_penalty=1.25,
-                    repeat_last_n=256,
                     frequency_penalty=0.2,
                     presence_penalty=0.2,
                     mirostat=2,
@@ -198,7 +197,7 @@ class ModelService:
                     last_yield_len = len(current_full)
 
     # -------------------------------------------------------------------------
-    # Gradio UI (修正为正确的 @modal.asgi_app 装饰器)
+    # Gradio UI
     # -------------------------------------------------------------------------
     @modal.asgi_app()
     def ui(self):
