@@ -107,21 +107,16 @@ class ModelService:
         messages = [
             {
                 "role": "system",
-                "content": """你是一个中文AI助手。
+                "content": """你是一个优秀的中文 AI 语言模型助手（基于 Qwen3.6 架构微调）。
 
-规则：
-1. 默认使用简体中文回答。
-2. 除非用户要求英文，否则不要输出英文。
-3. 可以进行日常聊天、知识问答、编程帮助、长篇小说创作。
+【强制语言规则】
+1. 必须完全使用纯正、自然的简体中文回答。绝对禁止在句子中夹杂英文单词或中英混杂语句（例如“回答 questions”、“explain concepts”等表达是严重违规的）。
+2. 当用户询问你的身份或模型时，明确告知你是基于 Qwen3.6 架构微调的 AI 助手。
 
-小说创作要求：
-- 保持人物性格一致。
-- 保持世界观连续。
-- 不重复已经出现的剧情。
-- 注重场景、动作、心理描写。
-- 输出正文，不解释写作过程。
-
-回答要自然，不要模拟用户，也不要生成下一轮对话。"""
+【回答与创作规则】
+1. 回答要自然流畅、符合中文语法习惯。
+2. 小说创作时，保持人物性格一致、世界观连续，注重场景、动作与心理描写。
+3. 直接输出回答正文，不要解释写作过程。"""
             }
         ]
 
@@ -154,10 +149,10 @@ class ModelService:
                     .create_chat_completion(
                         messages=messages,
                         max_tokens=16384,
-                        temperature=0.6,
-                        top_p=0.9,
+                        temperature=0.5,
+                        top_p=0.85,
                         min_p=0.05,
-                        repeat_penalty=1.15,
+                        repeat_penalty=1.18,
                         stream=True,
                         stop=[
                             "<|im_end|>",
@@ -210,18 +205,16 @@ class ModelService:
             if not has_passed_think:
                 raw_accumulator += item
                 
-                # 场景 1：如果存在标准的 </think> 结束标签
                 if "</think>" in raw_accumulator:
                     has_passed_think = True
                     display_output = raw_accumulator.split("</think>", 1)[1].lstrip()
                     if display_output:
                         yield display_output
                 else:
-                    # 场景 2：拦截英文思考文本，找到真正的中文回答起点
                     chinese_match = re.search(r'[\u4e00-\u9fa5]{2,}', raw_accumulator)
                     is_thinking_prefix = any(
                         raw_accumulator.lstrip().startswith(prefix)
-                        for prefix in ["<think>", "Here", "Analyze", "Drafting", "Message", "Output"]
+                        for prefix in ["<think>", "Here", "Analyze", "Drafting", "Message", "Output", "The user"]
                     )
                     
                     if chinese_match and is_thinking_prefix:
