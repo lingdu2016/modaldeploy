@@ -172,7 +172,7 @@ class ModelService:
                     .create_chat_completion(
                         messages=messages,
                         # 聊天+小说平衡
-                        max_tokens=4096,
+                        max_tokens=16384,
                         temperature=0.75,
                         top_p=0.9,
                         min_p=0.05,
