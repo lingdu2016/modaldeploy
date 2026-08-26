@@ -1,7 +1,7 @@
 # =============================================================================
-# unsloth/Qwen3-14B-GGUF
+# unsloth/Qwen3-14B-GGUF (Q5_K_XL)
 # Modal L4 + llama.cpp + Gradio
-# 最终优化版：纯中文增量输出 + 依赖修复
+# 终极标准版：Volume 持久化缓存 + 构建期下载（GPU 零空转）
 # =============================================================================
 
 import os
@@ -12,13 +12,13 @@ import asyncio
 import modal
 
 # =============================================================================
-# 模型配置（已更新为 unsloth/Qwen3-14B-GGUF）
+# 模型配置
 # =============================================================================
 MODEL_REPO = "unsloth/Qwen3-14B-GGUF"
-MODEL_FILE = "Qwen3-14B-UD-Q5_K_XL.gguf"  # 模型文件名
+MODEL_FILE = "Qwen3-14B-UD-Q5_K_XL.gguf"
 
 # =============================================================================
-# 环境镜像 (严格锁死相互兼容的包版本，防止 Gradio 崩溃)
+# S1: 环境镜像定义
 # =============================================================================
 image = (
     modal.Image.from_registry(
@@ -39,16 +39,38 @@ image = (
 )
 
 # =============================================================================
-# 模型缓存卷（存储桶已同步更新名称） & Modal App
+# S2: 模型预下载函数（利用 Volume 缓存，杜绝 GPU 启动白烧钱）
 # =============================================================================
-vol = modal.Volume.from_name("qwen3-14b-cache", create_if_missing=True)
-app = modal.App(name="qwen3-14b-fable-gradio")
+def hf_download():
+    """将指定 GGUF 模型文件下载至 Volume 缓存卷中"""
+    from huggingface_hub import hf_hub_download
+    
+    print(f"📦 开始平稳下载模型 {MODEL_REPO}/{MODEL_FILE} 到持久化卷...")
+    hf_hub_download(
+        repo_id=MODEL_REPO,
+        filename=MODEL_FILE,
+        local_dir="/cache",
+        resume_download=True,
+    )
+    print("🎉 模型预下载成功完成并已持久化!")
 
 # =============================================================================
-# 模型服务类
+# S3: 持久化卷挂载与构建绑定
+# =============================================================================
+vol = modal.Volume.from_name("qwen3-14b-cache", create_if_missing=True)
+
+# 按照标准模式将下载函数、Volume 绑定到镜像构建中
+image = image.run_function(
+    hf_download,
+    volumes={"/cache": vol}
+)
+
+app = modal.App(name="qwen3-14b-fable-gradio", image=image)
+
+# =============================================================================
+# S4: 模型服务类
 # =============================================================================
 @app.cls(
-    image=image,
     gpu="L4",
     volumes={"/cache": vol},
     scaledown_window=300,
@@ -59,27 +81,18 @@ app = modal.App(name="qwen3-14b-fable-gradio")
 class ModelService:
     @modal.enter()
     def load_model(self):
-        from huggingface_hub import hf_hub_download
         from llama_cpp import Llama
 
         model_path = f"/cache/{MODEL_FILE}"
-        if not os.path.exists(model_path):
-            print(f"下载模型: {MODEL_FILE}")
-            hf_hub_download(
-                repo_id=MODEL_REPO,
-                filename=MODEL_FILE,
-                local_dir="/cache"
-            )
-            vol.commit()
-
-        print("加载 llama.cpp ...")
+        print(f"正在从缓存卷加载模型: {model_path} ...")
+        
         self.llm = Llama(
             model_path=model_path,
             n_gpu_layers=-1,
             n_ctx=32768,
             verbose=False,
         )
-        print("模型加载完成")
+        print("模型加载完成，GPU 已就绪！")
 
     # -------------------------------------------------------------------------
     # 预测接口（流式增量输出）
@@ -90,7 +103,7 @@ class ModelService:
         system_prompt = """
 你是专精于简体中文创作的作家。
 你的全部输出必须用流畅、地道的中文直接呈现，不要添加任何注释、分析、括号说明或推理过程。
-若用户用中文提问，请用中文回答；若用户明确要求英文，可切换。
+若用户用中文提问，请用中文回答; 若用户明确要求英文，可切换。
 你的风格自然、连贯，像一位友好的中国作家。
 """
         messages = [{"role": "system", "content": system_prompt}]
@@ -188,7 +201,7 @@ class ModelService:
     # -------------------------------------------------------------------------
     # Gradio UI
     # -------------------------------------------------------------------------
-    @modal.asgi_app()
+    @app.asgi_app()
     def ui(self):
         import gradio as gr
         from fastapi import FastAPI
@@ -203,7 +216,7 @@ class ModelService:
             fn=chat,
             type="messages",
             title="Qwen3-14B 中文聊天助手",
-            description="Modal L4 + llama.cpp (unsloth/Qwen3-14B-GGUF)"
+            description="Modal L4 + llama.cpp (unsloth/Qwen3-14B-GGUF - Q5_K_XL + Volume Cache)"
         )
 
         demo.queue(default_concurrency_limit=1)
