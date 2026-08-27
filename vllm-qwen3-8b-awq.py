@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import json
 import os
 import subprocess
@@ -27,9 +28,7 @@ vllm_image = (
 GPU = "T4" 
 MODEL_NAME = "Qwen/Qwen3-8B-AWQ"
 
-# ------------------------------------------------------------------------------
-# 【修改重点】变量名统一为 vol，云端持久卷名称改为 "qwen3-8b-awq-cache"
-# ------------------------------------------------------------------------------
+# 云端持久卷
 vol = modal.Volume.from_name("qwen3-8b-awq-cache", create_if_missing=True)
 HF_CACHE_PATH = "/root/.cache/huggingface"
 
@@ -41,7 +40,7 @@ vllm_image = vllm_image.env(
 # 2. 部署区域与并发控制
 # ==============================================================================
 REGION = "us-east"      
-MIN_CONTAINERS = 0      # 无请求时 0 实例，不产生闲置计算费用
+MIN_CONTAINERS = 0      # 无请求且超过 scaledown_window 后自动缩容到 0
 TARGET_INPUTS = 20      # 适应沉浸式翻译同时推送多条字幕的并发需求
 
 with vllm_image.imports():
@@ -89,7 +88,7 @@ def wake_up():
     requests.post(f"http://127.0.0.1:{PORT}/wake_up").raise_for_status()
 
 # ==============================================================================
-# 4. 主服务定义 (包含 Modal GPU Memory Snapshot)
+# 4. 主服务定义 (包含 Modal GPU Memory Snapshot、1分钟空闲关闭与启动时间日志)
 # ==============================================================================
 APP_NAME = "qwen3-8b-awq-immersive-translate"
 app = modal.App(name=APP_NAME)
@@ -97,10 +96,10 @@ app = modal.App(name=APP_NAME)
 @app.server(
     image=vllm_image,
     gpu=GPU,
-    volumes={HF_CACHE_PATH: vol},                      # 使用名字修改后的 vol 挂载云硬盘[cite: 1, 2]
-    scaledown_window=1 * MINUTES,                      # 【关键修改】无请求后保持在线 1 分钟（60秒），超时才关机
-    enable_memory_snapshot=True,                       # 开启 Modal 内存快照功能[cite: 1, 2]
-    experimental_options={"enable_gpu_snapshot": True}, # 开启 GPU 显存快照，实现秒级冷启动[cite: 1, 2]
+    volumes={HF_CACHE_PATH: vol},                      # 挂载云硬盘
+    scaledown_window=1 * MINUTES,                      # 无请求后保持在线 1 分钟（60秒），超时关机
+    enable_memory_snapshot=True,                       # 开启 Modal 内存快照功能
+    experimental_options={"enable_gpu_snapshot": True}, # 开启 GPU 显存快照
     compute_region=REGION,
     min_containers=MIN_CONTAINERS,
     startup_timeout=10 * MINUTES,
@@ -108,12 +107,17 @@ app = modal.App(name=APP_NAME)
     routing_region=REGION,
     exit_grace_period=5,
     target_concurrency=TARGET_INPUTS,
-    unauthenticated=True,                               # 开放免鉴权，便于插件直接连接
+    unauthenticated=True,                               # 开放免鉴权
 )
 class QwenAWQServer:
     @modal.enter(snap=True)
     def startup(self):
-        """【首次部署】启动 vLLM -> 加载/下载模型 -> 预热 -> 写入内存快照"""
+        """【首次部署构建快照】启动 vLLM -> 加载/下载模型 -> 预热 -> 写入内存快照"""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n==================================================")
+        print(f"🚀 [首次部署启动] 时间: {now_str}")
+        print(f"==================================================\n")
+
         cmd = [
             "vllm",
             "serve",
@@ -133,15 +137,28 @@ class QwenAWQServer:
         self.process = subprocess.Popen(cmd)
         wait_ready(self.process)
         warmup()
-        sleep(1) # 休眠并保存显存/内存快照[cite: 1, 2]
+        sleep(1) # 休眠并保存显存/内存快照
 
     @modal.enter(snap=False)
     def restore(self):
-        """【后续看视频触发冷启动】跳过重新加载，直接从快照 2~4 秒内瞬间唤醒"""
+        """【冷启动/唤醒】从快照秒级唤醒并打印时间日志"""
+        start_time = time.time()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"\n==================================================")
+        print(f"⚡ [实例唤醒启动] 当前时间: {now_str}")
+        print(f"正在从 GPU 快照唤醒 vLLM 引擎...")
+        
         wake_up()
+        
+        elapsed = time.time() - start_time
+        print(f"✅ [唤醒完成] 耗时: {elapsed:.2f} 秒")
+        print(f"==================================================\n")
 
     @modal.exit()
     def stop(self):
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"🛑 [实例停止/休眠] 时间: {now_str}")
         self.process.terminate()
 
 # ==============================================================================
@@ -155,7 +172,7 @@ if __name__ == "__main__":
         print(f"\n==================================================")
         print(f"沉浸式翻译 API Base URL: {url}/v1")
         print(f"模型名称 (Model Name): {MODEL_NAME}")
-        print(f"持久卷名称: qwen3-8b-awq-cache")
+        print(f"空闲留存时间: 1 分钟 (scaledown_window=60s)")
         print(f"==================================================\n")
 
     asyncio.run(main())
