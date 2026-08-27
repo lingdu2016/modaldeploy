@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 import json
 import os
 import subprocess
@@ -88,7 +87,7 @@ def wake_up():
     requests.post(f"http://127.0.0.1:{PORT}/wake_up").raise_for_status()
 
 # ==============================================================================
-# 4. 主服务定义 (包含 Modal GPU Memory Snapshot、1分钟空闲关闭与启动时间日志)
+# 4. 主服务定义 (包含 Modal GPU Memory Snapshot 与 1分钟延时关闭)
 # ==============================================================================
 APP_NAME = "qwen3-8b-awq-immersive-translate"
 app = modal.App(name=APP_NAME)
@@ -96,10 +95,10 @@ app = modal.App(name=APP_NAME)
 @app.server(
     image=vllm_image,
     gpu=GPU,
-    volumes={HF_CACHE_PATH: vol},                      # 挂载云硬盘
-    scaledown_window=1 * MINUTES,                      # 无请求后保持在线 1 分钟（60秒），超时关机
-    enable_memory_snapshot=True,                       # 开启 Modal 内存快照功能
-    experimental_options={"enable_gpu_snapshot": True}, # 开启 GPU 显存快照
+    volumes={HF_CACHE_PATH: vol},                      # 挂载云硬盘[cite: 1, 2]
+    scaledown_window=1 * MINUTES,                      # 【关键修改】无请求后保持在线 1 分钟（60秒），超时才关机
+    enable_memory_snapshot=True,                       # 开启 Modal 内存快照功能[cite: 1, 2]
+    experimental_options={"enable_gpu_snapshot": True}, # 开启 GPU 显存快照[cite: 1, 2]
     compute_region=REGION,
     min_containers=MIN_CONTAINERS,
     startup_timeout=10 * MINUTES,
@@ -112,12 +111,7 @@ app = modal.App(name=APP_NAME)
 class QwenAWQServer:
     @modal.enter(snap=True)
     def startup(self):
-        """【首次部署构建快照】启动 vLLM -> 加载/下载模型 -> 预热 -> 写入内存快照"""
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n==================================================")
-        print(f"🚀 [首次部署启动] 时间: {now_str}")
-        print(f"==================================================\n")
-
+        """【首次部署】启动 vLLM -> 加载/下载模型 -> 预热 -> 写入内存快照"""
         cmd = [
             "vllm",
             "serve",
@@ -137,28 +131,15 @@ class QwenAWQServer:
         self.process = subprocess.Popen(cmd)
         wait_ready(self.process)
         warmup()
-        sleep(1) # 休眠并保存显存/内存快照
+        sleep(1) # 休眠并保存显存/内存快照[cite: 1, 2]
 
     @modal.enter(snap=False)
     def restore(self):
-        """【冷启动/唤醒】从快照秒级唤醒并打印时间日志"""
-        start_time = time.time()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        print(f"\n==================================================")
-        print(f"⚡ [实例唤醒启动] 当前时间: {now_str}")
-        print(f"正在从 GPU 快照唤醒 vLLM 引擎...")
-        
+        """【后续看视频触发冷启动】跳过重新加载，直接从快照 2~4 秒内瞬间唤醒"""
         wake_up()
-        
-        elapsed = time.time() - start_time
-        print(f"✅ [唤醒完成] 耗时: {elapsed:.2f} 秒")
-        print(f"==================================================\n")
 
     @modal.exit()
     def stop(self):
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"🛑 [实例停止/休眠] 时间: {now_str}")
         self.process.terminate()
 
 # ==============================================================================
