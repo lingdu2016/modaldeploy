@@ -34,4 +34,5 @@ jobs:
         run: |
           # 将 app.py 替换为你实际的入口文件模块路径
           #modal deploy app.py
-          modal deploy llama.py
+          #modal deploy llama.py
+          modal deploy vllm-qwen3-8b-awq.py
