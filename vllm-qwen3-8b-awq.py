@@ -98,6 +98,7 @@ app = modal.App(name=APP_NAME)
     image=vllm_image,
     gpu=GPU,
     volumes={HF_CACHE_PATH: vol},                      # 使用名字修改后的 vol 挂载云硬盘[cite: 1, 2]
+    scaledown_window=1 * MINUTES,                      # 【关键修改】无请求后保持在线 1 分钟（60秒），超时才关机
     enable_memory_snapshot=True,                       # 开启 Modal 内存快照功能[cite: 1, 2]
     experimental_options={"enable_gpu_snapshot": True}, # 开启 GPU 显存快照，实现秒级冷启动[cite: 1, 2]
     compute_region=REGION,
