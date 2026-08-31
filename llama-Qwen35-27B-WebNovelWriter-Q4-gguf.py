@@ -15,7 +15,7 @@ MODEL_FILE = "Qwen3.5-27B-WebNovel-Writer-zh-Q4_K_M.gguf"
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 # =============================================================================
-# 2. 镜像构建 (安全配置：禁用 AVX512/AVX2 高级指令，防止 132 SIGILL 崩溃)
+# 2. 镜像构建 (保留 CPU 指令隔离防护)
 # =============================================================================
 image = (
     modal.Image.from_registry(
@@ -46,7 +46,7 @@ app = modal.App(name="qwen3.5-27b-gguf-openai-api", image=image)
     gpu="L4",                   # 24GB 显存 L4 GPU
     volumes={"/cache": vol},    # 挂载模型存储卷
     scaledown_window=300,       # 5 分钟无请求自动休眠
-    max_containers=1            # 限制全局最多仅 1 个容器
+    max_containers=1            # 限制全局最多 1 个容器
 )
 class ModelService:
     @modal.enter()
@@ -54,22 +54,20 @@ class ModelService:
         """容器启动时自动加载模型至 GPU 显存"""
         from llama_cpp import Llama
         
-        print("🚀 正在加载 llama.cpp 引擎 (适配 L4 24GB 显存配置)...")
+        print("🚀 正在加载 llama.cpp 引擎 (8k 上下文显存安全配置)...")
         self.llm = Llama(
             model_path=f"/cache/{MODEL_FILE}",
             n_gpu_layers=-1,        # 全量 Layer 移入 GPU 显存
-            n_ctx=16384,            # 调整为 16k 上下文 (安全上限，防止 24GB 显存爆框)
-            type_k=2,               # 2 表示 GGML_TYPE_Q8_0 (8-bit KV Cache K 优化)
-            type_v=2,               # 2 表示 GGML_TYPE_Q8_0 (8-bit KV Cache V 优化)
-            offload_kqv=True,       # KV Cache 彻底推入 GPU 显存
+            n_ctx=8192,             # 降至 8192 确保 24GB 显存不溢出
+            offload_kqv=True,       # KV Cache 推入 GPU 显存
             verbose=False,
             n_batch=512
         )
-        print("🎉 模型加载完成，当前可用最大上下文：16384")
+        print("🎉 模型加载完成，当前可用最大上下文：8192")
 
     @modal.asgi_app()
     def web_app(self):
-        """把 FastAPI 网关直接集成在 GPU 类内部，消除多余的 CPU 节点"""
+        """FastAPI Web 路由入口"""
         from fastapi import FastAPI, Request
         from fastapi.responses import JSONResponse, StreamingResponse
         import json
