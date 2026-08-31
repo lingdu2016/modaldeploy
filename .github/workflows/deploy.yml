@@ -36,4 +36,5 @@ jobs:
           #modal deploy app.py
           #modal deploy llama.py
           #modal deploy vllm-qwen3-8b-awq.py
-          modal deploy llama-Qwen3-14B-Q5-gguf.py
+          #modal deploy llama-Qwen3-14B-Q5-gguf.py
+          modal deploy llama-Qwen35-27B-WebNovelWriter-Q4-gguf.py
