@@ -1,340 +1,155 @@
-# 作用：在 Modal L4 (24GB 显存) 上部署 Qwen3.5-27B-WebNovel-Writer-zh-GGUF
-#      开启 Q8 KV Cache，将上下文极限拉大至 32768 (32k)
-# =============================================================================
+# app3_openai.py
 # 部署命令: modal deploy app3_openai.py
-# =============================================================================
 
-import time
-import uuid
 import modal
+import time
+from typing import List, Optional, Union, Dict, Any
+from pydantic import BaseModel, Field
 
 # =============================================================================
-# S1: 环境准备 - 基于 CUDA 12.4 镜像
+# 1. 基础配置与模型参数
 # =============================================================================
-MODEL_REPO = "wcn123/Qwen3.5-27B-WebNovel-Writer-zh-GGUF"
+VOLUME_NAME = "qwen3.5-27b-cache"
 MODEL_FILE = "Qwen3.5-27B-WebNovel-Writer-zh-Q4_K_M.gguf"
-MODEL_ID = "qwen3.5-27b-webnovel"  # 客户端调用填这个
+MODEL_ALIAS = "qwen3.5-27b-webnovel"
 
+# 挂载持久化存储卷（已预先下载好模型文件）
+vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+
+# =============================================================================
+# 2. 镜像构建 (直接安装预编译 CUDA 轮子，无需手动编译)
+# =============================================================================
 image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
-        add_python="3.11"
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11"
     )
-    .apt_install("git", "wget", "curl")
+    .env({
+        # 强制底层向量计算使用通用的 AVX2/F16C 指令集，禁用易导致 Exit Code 132 的 AVX-512
+        "GGML_AVX512": "OFF",
+        "GGML_AVX2": "ON",
+    })
     .pip_install(
-        "fastapi",
-        "huggingface_hub==0.25.2",
-        "pydantic<3",
-        "requests",
-        "sse-starlette",
-    )
-    # CUDA 12.4 对应的 llama-cpp-python whl
-    .pip_install(
+        # 使用官方预编译的 CUDA 12 现成轮子，秒级安装
         "llama-cpp-python",
-        extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu124"
+        extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu124",
     )
-)
-
-
-# =============================================================================
-# S2: 模型预下载
-# =============================================================================
-def hf_download():
-    """预下载 Qwen3.5-27B-WebNovel-Writer-zh-Q4_K_M 权重文件至持久化缓存卷"""
-    from huggingface_hub import hf_hub_download
-
-    print(f"📦 开始下载 {MODEL_REPO}/{MODEL_FILE}...")
-
-    hf_hub_download(
-        repo_id=MODEL_REPO,
-        filename=MODEL_FILE,
-        local_dir="/cache",
-        resume_download=True,
+    .pip_install(
+        "fastapi==0.115.0",
+        "uvicorn==0.30.6",
+        "pydantic==2.9.2"
     )
-
-    print("🎉 模型预下载成功完成!")
-
-
-# =============================================================================
-# S3: 持久化卷挂载与 App 初始化
-# =============================================================================
-vol = modal.Volume.from_name("qwen3.5-27b-cache", create_if_missing=True)
-
-image = image.run_function(
-    hf_download,
-    volumes={"/cache": vol},
 )
 
 app = modal.App(name="qwen3.5-27b-gguf-openai-api", image=image)
 
+# =============================================================================
+# 3. Pydantic 数据结构定义 (OpenAI 协议兼容)
+# =============================================================================
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    model: str = MODEL_ALIAS
+    messages: List[ChatMessage]
+    temperature: Optional[float] = 0.8
+    top_p: Optional[float] = 0.95
+    max_tokens: Optional[int] = 4096
+    stream: Optional[bool] = False
+    repeat_penalty: Optional[float] = 1.08  # 精细调校的网文重复惩罚，避免乱码
 
 # =============================================================================
-# S4: 模型服务 (严格指定 L4 + KV Cache 量化 + 32k 上下文)
+# 4. Modal GPU 服务类
 # =============================================================================
 @app.cls(
-    gpu="L4",  # 强行指定 L4 GPU (24GB VRAM)
-    volumes={"/cache": vol},
-    scaledown_window=200,
-    timeout=800,
-    max_containers=1,
+    gpu="L4",                   # 绑定 24GB 显存的 L4 GPU
+    volumes={"/cache": vol},    # 挂载包含 GGUF 模型文件的存储卷
+    scaledown_window=300,       # 5 分钟无请求自动休眠，保温显存
+    max_containers=1            # 单容器限制，避免冷启动抖动
 )
-@modal.concurrent(max_inputs=20)
 class ModelService:
-
     @modal.enter()
     def load_model(self):
-        import asyncio
-        from llama_cpp import Llama, GGML_TYPE_Q8_0
-
-        self.lock = asyncio.Lock()
-
-        model_path = f"/cache/{MODEL_FILE}"
-
-        print("加载 llama.cpp (开启 Q8 KV Cache 优化以支撑 L4 32k 上下文)...")
-
+        """容器启动时加载模型至 GPU 显存"""
+        from llama_cpp import Llama
+        
+        print("🚀 正在加载 llama.cpp 引擎 (开启 Q8_0 KV Cache 优化)...")
         self.llm = Llama(
-            model_path=model_path,
-            n_gpu_layers=-1,      # 全部层 offload 到 L4 GPU
-            n_ctx=32768,          # L4 下优化后的极限上下文 (32k token)
-            n_batch=512,          # 处理 prompt 时的批次大小
-            n_ubatch=512,
-            flash_attn=True,      # 必须开启 Flash Attention 以提升长文本速度并降低显存开销
-            # 关键优化：将 Key/Value Cache 量化为 8-bit (Q8_0)，显存开销降低 ~50%
-            type_k=GGML_TYPE_Q8_0,
-            type_v=GGML_TYPE_Q8_0,
+            model_path=f"/cache/{MODEL_FILE}",
+            n_gpu_layers=-1,        # 27B 全部 Offload 到 GPU 显存
+            n_ctx=32768,            # 支撑 L4 上下文极速扩容至 32k
+            type_k=8,               # KV Cache K 8-bit 量化 (GGML_TYPE_Q8_0)
+            type_v=8,               # KV Cache V 8-bit 量化 (GGML_TYPE_Q8_0)
+            offload_kqv=True,       # KV Cache 彻底推入 GPU 显存
             verbose=False,
+            n_batch=512
         )
+        print("🎉 模型加载完成，当前可用最大上下文：32768")
 
-        print("模型加载完成，当前可用最大上下文：32768")
-
-    def _build_prompt(self, messages: list) -> str:
-        """把 OpenAI 风格的 messages 列表拼接成 ChatML prompt"""
-        default_system = """你是一个中文网文小说写作助手。
-
-规则：
-1. 默认使用简体中文回答。
-2. 保持人物性格一致、剧情伏笔呼应与世界观连续。
-3. 不重复已经出现的剧情，注重场景、动作、细节、心理描写与文笔节奏。
-4. 输出小说正文，不解释写作过程，不生成多余的总结说明。"""
-
-        has_system = any(m.get("role") == "system" for m in messages)
-        prompt = ""
-
-        if not has_system:
-            prompt += f"<|im_start|>system\n{default_system}<|im_end|>\n"
-
-        # 32k 极大上下文下，可以适当多保留历史对话（如最近 40 轮），方便小说连贯创作
-        trimmed = messages[-40:]
-
-        for m in trimmed:
-            role = m.get("role", "user")
-            content = m.get("content", "")
-            if isinstance(content, list):
-                content = "".join(
-                    part.get("text", "") for part in content if isinstance(part, dict)
-                )
-            prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
-
-        prompt += "<|im_start|>assistant\n"
-        return prompt
-
-    async def generate_stream(self, messages: list, temperature: float, top_p: float,
-                               max_tokens: int):
-        """线程安全、低开销的流式推理逻辑"""
-        import asyncio
-
-        async with self.lock:
-            prompt = self._build_prompt(messages)
-
-            loop = asyncio.get_event_loop()
-            aqueue: asyncio.Queue = asyncio.Queue()
-            END = object()
-
-            def worker():
-                import time as _time
-                token_count = 0
-                t_start = _time.time()
-                t_first_token = None
-
-                try:
-                    stream = self.llm.create_completion(
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        top_p=top_p,
-                        top_k=40,
-                        min_p=0.05,
-                        repeat_penalty=1.1,  # 网文创作推荐 1.08~1.12，避免重复但又不破坏文笔
-                        stream=True,
-                        stop=[
-                            "<|im_end|>",
-                            "<|im_start|>",
-                            "<|endoftext|>",
-                            "<|eot_id|>",
-                        ],
-                    )
-
-                    for chunk in stream:
-                        text = chunk["choices"][0]["text"]
-                        if text:
-                            if t_first_token is None:
-                                t_first_token = _time.time()
-                            token_count += 1
-                            loop.call_soon_threadsafe(aqueue.put_nowait, text)
-
-                except Exception as e:
-                    loop.call_soon_threadsafe(aqueue.put_nowait, e)
-
-                finally:
-                    t_end = _time.time()
-                    if t_first_token is not None and token_count > 0:
-                        gen_time = t_end - t_first_token
-                        tok_per_sec = token_count / gen_time if gen_time > 0 else 0
-                        print(
-                            f"⏱️ 首字延迟: {t_first_token - t_start:.2f}s | "
-                            f"生成 {token_count} tokens | "
-                            f"耗时 {gen_time:.2f}s | "
-                            f"速度: {tok_per_sec:.2f} tokens/s"
-                        )
-                    loop.call_soon_threadsafe(aqueue.put_nowait, END)
-
-            import threading
-            thread = threading.Thread(target=worker, daemon=True)
-            thread.start()
-
-            while True:
-                item = await aqueue.get()
-                if item is END:
-                    break
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-
-    # =========================================================================
-    # OpenAI 兼容 API
-    # =========================================================================
-    @modal.asgi_app()
-    def api(self):
+    @modal.web_endpoint(method="POST", path="/v1/chat/completions")
+    def chat_completions(self, request: ChatCompletionRequest):
+        """OpenAI /v1/chat/completions 兼容标准接口"""
+        from fastapi.responses import JSONResponse, StreamingResponse
         import json
-        from fastapi import FastAPI, Request
-        from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel
-        from typing import Optional, List, Union
 
-        web_app = FastAPI(title="Qwen3.5-27B WebNovel Writer OpenAI-compatible API")
+        # 转换为 llama-cpp 接受的 messages 格式
+        formatted_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
-        class ChatMessage(BaseModel):
-            role: str
-            content: Union[str, list]
+        # 修正/防暴降参数设置，保证网文文笔连贯
+        temp = request.temperature if request.temperature is not None else 0.8
+        top_p = request.top_p if request.top_p is not None else 0.95
+        rep_pen = request.repeat_penalty if request.repeat_penalty is not None else 1.08
 
-        class ChatCompletionRequest(BaseModel):
-            model: str = MODEL_ID
-            messages: List[ChatMessage]
-            temperature: Optional[float] = 0.75
-            top_p: Optional[float] = 0.9
-            max_tokens: Optional[int] = 8192  # 支持单次写较长的大章节输出
-            stream: Optional[bool] = False
+        # 1. 流式响应处理 (Streaming)
+        if request.stream:
+            def stream_generator():
+                start_time = time.time()
+                first_token_time = None
+                generated_tokens = 0
 
-        @web_app.get("/v1/models")
-        async def list_models(request: Request):
-            return {
-                "object": "list",
-                "data": [
-                    {
-                        "id": MODEL_ID,
-                        "object": "model",
-                        "created": int(time.time()),
-                        "owned_by": "self-hosted",
-                    }
-                ],
-            }
-
-        @web_app.post("/v1/chat/completions")
-        async def chat_completions(req: ChatCompletionRequest, request: Request):
-            messages = [m.model_dump() for m in req.messages]
-            completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-            created = int(time.time())
-
-            if req.stream:
-                async def event_generator():
-                    first_chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": req.model,
-                        "choices": [
-                            {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-                        ],
-                    }
-                    yield f"data: {json.dumps(first_chunk, ensure_ascii=False)}\n\n"
-
-                    async for delta_text in self.generate_stream(
-                        messages, req.temperature, req.top_p, req.max_tokens
-                    ):
-                        chunk = {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": req.model,
-                            "choices": [
-                                {"index": 0, "delta": {"content": delta_text}, "finish_reason": None}
-                            ],
-                        }
-                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-                    final_chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": req.model,
-                        "choices": [
-                            {"index": 0, "delta": {}, "finish_reason": "stop"}
-                        ],
-                    }
-                    yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
-                    yield "data: [DONE]\n\n"
-
-                return StreamingResponse(
-                    event_generator(), media_type="text/event-stream"
+                response_stream = self.llm.create_chat_completion(
+                    messages=formatted_messages,
+                    max_tokens=request.max_tokens,
+                    temperature=temp,
+                    top_p=top_p,
+                    repeat_penalty=rep_pen,
+                    stream=True
                 )
 
-            else:
-                full_text = ""
-                async for delta_text in self.generate_stream(
-                    messages, req.temperature, req.top_p, req.max_tokens
-                ):
-                    full_text += delta_text
+                for chunk in response_stream:
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                    
+                    delta = chunk['choices'][0]['delta']
+                    if 'content' in delta:
+                        generated_tokens += 1
+                        
+                    data_str = json.dumps(chunk, ensure_ascii=False)
+                    yield f"data: {data_str}\n\n"
 
-                return {
-                    "id": completion_id,
-                    "object": "chat.completion",
-                    "created": created,
-                    "model": req.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": full_text},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                    },
-                }
+                total_time = time.time() - start_time
+                ttft = (first_token_time - start_time) if first_token_time else 0
+                tps = generated_tokens / total_time if total_time > 0 else 0
+                print(f"⏱️ 首字延迟: {ttft:.2f}s | 生成 {generated_tokens} tokens | 耗时 {total_time:.2f}s | 速度: {tps:.2f} tokens/s")
 
-        @web_app.get("/health")
-        async def health():
-            return {"status": "ok"}
+                yield "data: [DONE]\n\n"
 
-        return web_app
+            return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
+        # 2. 非流式响应处理 (Non-Streaming)
+        start_time = time.time()
+        response = self.llm.create_chat_completion(
+            messages=formatted_messages,
+            max_tokens=request.max_tokens,
+            temperature=temp,
+            top_p=top_p,
+            repeat_penalty=rep_pen,
+            stream=False
+        )
+        total_time = time.time() - start_time
+        usage = response.get("usage", {})
+        completion_tokens = usage.get("completion_tokens", 0)
+        tps = completion_tokens / total_time if total_time > 0 else 0
+        print(f"⏱️ [非流式] 生成 {completion_tokens} tokens | 耗时 {total_time:.2f}s | 速度: {tps:.2f} tokens/s")
 
-# =============================================================================
-# S5: 本地入口点
-# =============================================================================
-@app.local_entrypoint()
-def main():
-    print("部署完成")
-    print("modal deploy app3_openai.py")
+        return JSONResponse(content=response)
