@@ -3,32 +3,29 @@
 
 import modal
 import time
-from typing import List, Optional, Union, Dict, Any
+from typing import Dict, Any
 
 # =============================================================================
 # 1. 基础配置与模型参数
 # =============================================================================
 VOLUME_NAME = "qwen3.5-27b-cache"
 MODEL_FILE = "Qwen3.5-27B-WebNovel-Writer-zh-Q4_K_M.gguf"
-MODEL_ALIAS = "qwen3.5-27b-webnovel"
 
 # 挂载持久化存储卷
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 # =============================================================================
-# 2. 镜像构建 (修复 Exit Code 132/AVX-512 崩溃，预装 CUDA 12 轮子)
+# 2. 镜像构建
 # =============================================================================
 image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11"
     )
     .env({
-        # 禁用 AVX-512 防止 SIGILL (Exit Code 132) 崩溃及乱码，强制使用通用 AVX2/F16C
         "GGML_AVX512": "OFF",
         "GGML_AVX2": "ON",
     })
     .pip_install(
-        # 使用官方预编译 CUDA 12 现成轮子
         "llama-cpp-python",
         extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu124",
     )
@@ -61,22 +58,42 @@ class ModelService:
             model_path=f"/cache/{MODEL_FILE}",
             n_gpu_layers=-1,        # 27B 全部 Offload 到 GPU 显存
             n_ctx=32768,            # 上下文扩容至 32k
-            type_k=8,               # KV Cache K 8-bit 量化 (GGML_TYPE_Q8_0) 防止 OOM
-            type_v=8,               # KV Cache V 8-bit 量化 (GGML_TYPE_Q8_0) 防止 OOM
+            type_k=8,               # KV Cache K 8-bit 量化防止 OOM
+            type_v=8,               # KV Cache V 8-bit 量化防止 OOM
             offload_kqv=True,       # KV Cache 彻底推入 GPU 显存
             verbose=False,
             n_batch=512
         )
         print("🎉 模型加载完成，当前可用最大上下文：32768")
 
-    # 使用 Modal 最新版 API @modal.fastapi_endpoint
-    @modal.fastapi_endpoint(method="POST", path="/v1/chat/completions")
-    def chat_completions(self, request_data: Dict[str, Any]):
-        """OpenAI /v1/chat/completions 兼容标准接口 (采用 Dict 接收，避免顶层导入崩溃)"""
-        from fastapi.responses import JSONResponse, StreamingResponse
-        import json
+    @modal.method()
+    def generate(self, formatted_messages: list, max_tokens: int, temperature: float, top_p: float, repeat_penalty: float, stream: bool):
+        """底层生成接口"""
+        return self.llm.create_chat_completion(
+            messages=formatted_messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repeat_penalty=repeat_penalty,
+            stream=stream
+        )
 
-        # 解析请求参数
+# =============================================================================
+# 4. FastAPI Web App 路由入口 (Modal 标准 HTTP 代理模式)
+# =============================================================================
+@app.function(image=image)
+@modal.asgi_app()
+def fastapi_app():
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse, StreamingResponse
+    import json
+
+    web_app = FastAPI()
+
+    @web_app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        request_data = await request.json()
+
         messages = request_data.get("messages", [])
         max_tokens = request_data.get("max_tokens", 4096)
         temperature = request_data.get("temperature", 0.8)
@@ -84,18 +101,19 @@ class ModelService:
         repeat_penalty = request_data.get("repeat_penalty", 1.08)
         stream = request_data.get("stream", False)
 
-        # 转换为 llama-cpp 接收的 messages 格式
         formatted_messages = [{"role": msg.get("role"), "content": msg.get("content")} for msg in messages]
 
-        # 1. 流式响应处理 (Streaming)
+        service = ModelService()
+
+        # 1. 流式处理
         if stream:
             def stream_generator():
                 start_time = time.time()
                 first_token_time = None
                 generated_tokens = 0
 
-                response_stream = self.llm.create_chat_completion(
-                    messages=formatted_messages,
+                response_stream = service.generate.remote(
+                    formatted_messages=formatted_messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
@@ -123,10 +141,10 @@ class ModelService:
 
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
-        # 2. 非流式响应处理 (Non-Streaming)
+        # 2. 非流式处理
         start_time = time.time()
-        response = self.llm.create_chat_completion(
-            messages=formatted_messages,
+        response = service.generate.remote(
+            formatted_messages=formatted_messages,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -140,3 +158,5 @@ class ModelService:
         print(f"⏱️ [非流式] 生成 {completion_tokens} tokens | 耗时 {total_time:.2f}s | 速度: {tps:.2f} tokens/s")
 
         return JSONResponse(content=response)
+
+    return web_app
