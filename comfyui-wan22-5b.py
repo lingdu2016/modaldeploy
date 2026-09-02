@@ -6,7 +6,7 @@ import modal
 import urllib.request
 import urllib.error
 
-# ====================== 配置区 ======================
+# ====================== 配置区 (完全还原原版) ======================
 VOLUME_NAME = "wan22-5b-cache"          # 模型缓存卷
 OUTPUT_VOLUME_NAME = "wan22-output"   # 生成视频保存卷
 APP_NAME = "comfyui-wan22-5b"
@@ -18,11 +18,12 @@ SCALEDOWN_WINDOW_SECONDS = 300
 WEB_PORT = 8000
 WEB_STARTUP_TIMEOUT_SECONDS = 300
 HF_SECRET_NAME = "huggingface-secret"
-# ====================================================
+# ====================================================================
 
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 output_vol = modal.Volume.from_name(OUTPUT_VOLUME_NAME, create_if_missing=True)
 
+# 100% 还原您原本的 Image 镜像定义，确保命中缓存（不加任何新 apt 包）
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .env({"DEBIAN_FRONTEND": "noninteractive"})
@@ -32,8 +33,6 @@ image = (
         "libgl1",        
         "libglx-mesa0",  
         "libglib2.0-0",
-        "net-tools",  # 新增：用于端口与网络诊断
-        "procps",     # 新增：用于进程诊断
     )
     .pip_install(
         "comfy-cli==1.7.1",
@@ -46,7 +45,7 @@ image = (
     )
 )
 
-# 安装自定义节点
+# 安装自定义节点 (完全保持原版)
 image = (
     image
     .run_commands("comfy node install --fast-deps image-resize-comfyui")
@@ -149,66 +148,36 @@ app = modal.App(name=APP_NAME, image=image)
 @modal.concurrent(max_inputs=MAX_INPUTS)
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
-    """启动 ComfyUI Web UI，带完整调试日志记录"""
-    print(f"=== [DEBUG] Starting ComfyUI server process on port {WEB_PORT} ===")
+    """启动 ComfyUI Web UI 并通过 HTTP 探测连接就绪状态"""
+    print(f"=== [STARTING] Launching ComfyUI on port {WEB_PORT} ===")
     
-    # 启动 ComfyUI 并捕捉标准输出与错误
+    # 1. 启动 ComfyUI 后台进程
     process = subprocess.Popen(
         f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT}",
         shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
     )
 
     start_time = time.time()
-    check_counter = 0
-
+    
+    # 2. 轮询探测 8000 端口，服务就绪后直接 return 告知 Modal 网关
     while time.time() - start_time < WEB_STARTUP_TIMEOUT_SECONDS:
-        check_counter += 1
-        
-        # 检查子进程是否已非正常退出
-        poll_status = process.poll()
-        if poll_status is not None:
-            remaining_output, _ = process.communicate()
-            print(f"=== [ERROR] ComfyUI process exited unexpectedly with code {poll_status} ===")
-            print(f"[PROCESS OUTPUT]:\n{remaining_output}")
-            raise RuntimeError(f"ComfyUI exited with code {poll_status}")
+        if process.poll() is not None:
+            raise RuntimeError("ComfyUI process exited prematurely.")
 
-        # 尝试通过 HTTP 探测服务就绪状态
         try:
-            target_url = f"http://127.0.0.1:{WEB_PORT}"
-            req = urllib.request.Request(target_url, headers={"User-Agent": "Modal-Health-Check"})
-            
-            with urllib.request.urlopen(req, timeout=3) as response:
-                print(f"=== [SUCCESS] Health check passed! HTTP Status Code: {response.status} ===")
-                print(f"=== [DEBUG] Server response read successfully. Handing over control to Modal proxy. ===")
-                # 确定端口正常且响应后，返回成功信号
+            req = urllib.request.Request(f"http://127.0.0.1:{WEB_PORT}")
+            with urllib.request.urlopen(req, timeout=2) as response:
+                print(f"=== [SUCCESS] ComfyUI is up and running! (Status: {response.status}) ===")
                 return
         except urllib.error.HTTPError as e:
-            # 如果能拿到 HTTP 状态码（即使是 404/500），说明 Web 服务器本身已经监听并响应了
-            print(f"=== [DEBUG Check #{check_counter}] HTTP Server responded with code {e.code}. Server is alive! ===")
+            # 即使返回 404/403 也说明 HTTP 服务端已经开启监听
+            print(f"=== [SUCCESS] ComfyUI HTTP server active! (Code: {e.code}) ===")
             return
         except Exception as err:
-            # 每隔 10 秒打一次诊断日志，防止刷屏
-            if check_counter % 5 == 0:
-                elapsed = int(time.time() - start_time)
-                print(f"[DIAGNOSTIC {elapsed}s] Waiting for HTTP server... Last error: {err}")
-                
-                # 检查系统 8000 端口占用情况
-                try:
-                    netstat = subprocess.check_output("netstat -tuln", shell=True, text=True)
-                    print(f"[NETSTAT STATE]:\n{netstat.strip()}")
-                except Exception as net_err:
-                    print(f"[NETSTAT ERROR]: {net_err}")
+            elapsed = int(time.time() - start_time)
+            if elapsed % 10 == 0:
+                print(f"[WAITING {elapsed}s] Probing http://127.0.0.1:{WEB_PORT} ...")
 
         time.sleep(2)
 
-    # 超时抛出异常并收集残余输出
-    print(f"=== [ERROR] Startup timed out after {WEB_STARTUP_TIMEOUT_SECONDS} seconds ===")
-    if process.poll() is None:
-        process.terminate()
-    out, _ = process.communicate()
-    print(f"[FINAL PROCESS LOGS]:\n{out}")
-    raise TimeoutError("ComfyUI server failed to become responsive within timeout window.")
+    raise TimeoutError("ComfyUI server failed to respond within startup timeout.")
