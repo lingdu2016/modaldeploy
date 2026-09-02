@@ -133,7 +133,7 @@ app = modal.App(name=APP_NAME, image=image)
 
 
 # =============================================================================
-# 关闭详细日志与日志推送的启动逻辑
+# 静默启动 + 并发处理，避免前端 WebSocket / 轮询请求互相排队导致的反复重连弹窗
 # =============================================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
@@ -145,14 +145,16 @@ app = modal.App(name=APP_NAME, image=image)
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
 )
+@modal.concurrent(max_inputs=10)
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
-    """静默启动方案：关闭 WebSocket 日志刷屏"""
+    """静默启动方案：关闭 WebSocket 日志刷屏，并允许并发请求"""
     print(f"🌐 正在以静默模式启动 ComfyUI Web 界面 (Port: {WEB_PORT})...")
-    
+
     # 参数说明：
-    # --dont-print-server: 禁止向前端 Web 界面推送日志消息，防止冲刷 WebSocket 通道
     # --verbose WARNING: 服务端仅在发生警告或严重错误时才输出日志，屏蔽正常的 INFO 刷屏
+    # 注：已移除 --dont-print-server，该参数会导致 WS 通道长时间无数据流动，
+    #     容易被判定为空闲连接从而反复断线重连
     cmd = (
         f"python3 /root/comfy/ComfyUI/main.py "
         f"--listen 0.0.0.0 "
@@ -160,5 +162,5 @@ def ui():
         f"--disable-auto-launch "
         f"--verbose WARNING"
     )
-    
+
     subprocess.Popen(cmd, shell=True)
