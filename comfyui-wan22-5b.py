@@ -14,7 +14,7 @@ TIMEOUT_SECONDS = 1800
 SCALEDOWN_WINDOW_SECONDS = 300
 WEB_PORT = 8000
 WEB_STARTUP_TIMEOUT_SECONDS = 120
-HF_SECRET_NAME = "huggingface"
+HF_SECRET_NAME = "huggingface-secret"
 # ====================================================================
 
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
