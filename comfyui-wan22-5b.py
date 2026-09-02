@@ -10,7 +10,6 @@ OUTPUT_VOLUME_NAME = "wan22-output"   # 生成视频保存卷
 APP_NAME = "comfyui-wan22-5b"
 GPU_TYPE = "L4"
 MAX_CONTAINERS = 1
-MAX_INPUTS = 10
 TIMEOUT_SECONDS = 1800
 SCALEDOWN_WINDOW_SECONDS = 300
 WEB_PORT = 8000
@@ -21,7 +20,7 @@ HF_SECRET_NAME = "huggingface-secret"
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 output_vol = modal.Volume.from_name(OUTPUT_VOLUME_NAME, create_if_missing=True)
 
-# 保持镜像层完全不变，命中底层缓存
+# 100% 保持你原来的 Image 镜像定义，确保命中底层缓存
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .env({"DEBIAN_FRONTEND": "noninteractive"})
@@ -43,7 +42,7 @@ image = (
     )
 )
 
-# 安装自定义节点 (保持不变)
+# 安装自定义节点 (完全还原)
 image = (
     image
     .run_commands("comfy node install --fast-deps image-resize-comfyui")
@@ -134,9 +133,7 @@ app = modal.App(name=APP_NAME, image=image)
 
 
 # =============================================================================
-# 借鉴参考代码优化后的 UI 启动逻辑
-# =============================================================================
-# 修复后的 UI 启动逻辑
+# 纯净无痛解决 WebSocket 断连重连的 UI 启动逻辑
 # =============================================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
@@ -148,17 +145,11 @@ app = modal.App(name=APP_NAME, image=image)
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
 )
-@modal.concurrent(max_inputs=1)  # 将并发设为 1，收拢长连接通道
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
-    """纯净标准的 ComfyUI 启动器"""
-    print(f"🌐 启动 ComfyUI Web 界面 (Port: {WEB_PORT})...")
+    """借鉴参考仓库的极简原生启动方案"""
+    print(f"🌐 正在启动 ComfyUI Web 界面 (Port: {WEB_PORT})...")
     
-    # 移除非法参数 --server-ping-interval，使用参考代码完全一致的合法启动指令
-    cmd = f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT}"
-    subprocess.Popen(cmd, shell=True)
-    print("🌐 启动 ComfyUI Web 界面并开启长连接保持...")
-    
-    # 结合参考代码的直接启动 + 心跳包维持机制，解决频繁断连重连问题
-    cmd = f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT} --server-ping-interval 30"
+    # 直接调用 Python 原生 main.py，屏蔽掉 comfy-cli 可能引发的中间层代理干扰
+    cmd = f"python3 /root/comfy/ComfyUI/main.py --listen 0.0.0.0 --port {WEB_PORT} --disable-auto-launch"
     subprocess.Popen(cmd, shell=True)
