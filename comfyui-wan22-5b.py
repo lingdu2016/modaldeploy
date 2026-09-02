@@ -136,6 +136,8 @@ app = modal.App(name=APP_NAME, image=image)
 # =============================================================================
 # 借鉴参考代码优化后的 UI 启动逻辑
 # =============================================================================
+# 修复后的 UI 启动逻辑
+# =============================================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
     gpu=GPU_TYPE,
@@ -146,10 +148,15 @@ app = modal.App(name=APP_NAME, image=image)
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
 )
-@modal.concurrent(max_inputs=1)  # 关键修复：将 max_inputs 设为 1，防止 WebSocket 节点连接在并发通道中撞车与断连
+@modal.concurrent(max_inputs=1)  # 将并发设为 1，收拢长连接通道
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
-    """借鉴稳定范式的 ComfyUI 启动器"""
+    """纯净标准的 ComfyUI 启动器"""
+    print(f"🌐 启动 ComfyUI Web 界面 (Port: {WEB_PORT})...")
+    
+    # 移除非法参数 --server-ping-interval，使用参考代码完全一致的合法启动指令
+    cmd = f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT}"
+    subprocess.Popen(cmd, shell=True)
     print("🌐 启动 ComfyUI Web 界面并开启长连接保持...")
     
     # 结合参考代码的直接启动 + 心跳包维持机制，解决频繁断连重连问题
