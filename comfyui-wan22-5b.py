@@ -3,10 +3,8 @@ import subprocess
 import time
 from pathlib import Path
 import modal
-import urllib.request
-import urllib.error
 
-# ====================== 配置区 (完全还原原版) ======================
+# ====================== 配置区 ======================
 VOLUME_NAME = "wan22-5b-cache"          # 模型缓存卷
 OUTPUT_VOLUME_NAME = "wan22-output"   # 生成视频保存卷
 APP_NAME = "comfyui-wan22-5b"
@@ -18,12 +16,12 @@ SCALEDOWN_WINDOW_SECONDS = 300
 WEB_PORT = 8000
 WEB_STARTUP_TIMEOUT_SECONDS = 300
 HF_SECRET_NAME = "huggingface-secret"
-# ====================================================================
+# ====================================================
 
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 output_vol = modal.Volume.from_name(OUTPUT_VOLUME_NAME, create_if_missing=True)
 
-# 100% 还原您原本的 Image 镜像定义，确保命中缓存（不加任何新 apt 包）
+# 保持镜像层完全不变，命中底层缓存
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .env({"DEBIAN_FRONTEND": "noninteractive"})
@@ -45,7 +43,7 @@ image = (
     )
 )
 
-# 安装自定义节点 (完全保持原版)
+# 安装自定义节点 (保持不变)
 image = (
     image
     .run_commands("comfy node install --fast-deps image-resize-comfyui")
@@ -135,6 +133,9 @@ image = (
 app = modal.App(name=APP_NAME, image=image)
 
 
+# =============================================================================
+# 借鉴参考代码优化后的 UI 启动逻辑
+# =============================================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
     gpu=GPU_TYPE,
@@ -145,39 +146,12 @@ app = modal.App(name=APP_NAME, image=image)
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
 )
-@modal.concurrent(max_inputs=MAX_INPUTS)
+@modal.concurrent(max_inputs=1)  # 关键修复：将 max_inputs 设为 1，防止 WebSocket 节点连接在并发通道中撞车与断连
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
-    """启动 ComfyUI Web UI 并通过 HTTP 探测连接就绪状态"""
-    print(f"=== [STARTING] Launching ComfyUI on port {WEB_PORT} ===")
+    """借鉴稳定范式的 ComfyUI 启动器"""
+    print("🌐 启动 ComfyUI Web 界面并开启长连接保持...")
     
-    # 1. 启动 ComfyUI 后台进程
-    process = subprocess.Popen(
-        f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT}",
-        shell=True,
-    )
-
-    start_time = time.time()
-    
-    # 2. 轮询探测 8000 端口，服务就绪后直接 return 告知 Modal 网关
-    while time.time() - start_time < WEB_STARTUP_TIMEOUT_SECONDS:
-        if process.poll() is not None:
-            raise RuntimeError("ComfyUI process exited prematurely.")
-
-        try:
-            req = urllib.request.Request(f"http://127.0.0.1:{WEB_PORT}")
-            with urllib.request.urlopen(req, timeout=2) as response:
-                print(f"=== [SUCCESS] ComfyUI is up and running! (Status: {response.status}) ===")
-                return
-        except urllib.error.HTTPError as e:
-            # 即使返回 404/403 也说明 HTTP 服务端已经开启监听
-            print(f"=== [SUCCESS] ComfyUI HTTP server active! (Code: {e.code}) ===")
-            return
-        except Exception as err:
-            elapsed = int(time.time() - start_time)
-            if elapsed % 10 == 0:
-                print(f"[WAITING {elapsed}s] Probing http://127.0.0.1:{WEB_PORT} ...")
-
-        time.sleep(2)
-
-    raise TimeoutError("ComfyUI server failed to respond within startup timeout.")
+    # 结合参考代码的直接启动 + 心跳包维持机制，解决频繁断连重连问题
+    cmd = f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT} --server-ping-interval 30"
+    subprocess.Popen(cmd, shell=True)
