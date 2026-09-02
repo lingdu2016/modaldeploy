@@ -1,9 +1,10 @@
 import os
 import subprocess
+import time
 from pathlib import Path
 import modal
 
-# ====================== 配置区 (完全保持您原版的设置) ======================
+# ====================== 配置区 ======================
 VOLUME_NAME = "wan22-5b-cache"          # 模型缓存卷
 OUTPUT_VOLUME_NAME = "wan22-output"   # 生成视频保存卷
 APP_NAME = "comfyui-wan22-5b"
@@ -13,9 +14,9 @@ MAX_INPUTS = 10
 TIMEOUT_SECONDS = 1800
 SCALEDOWN_WINDOW_SECONDS = 300
 WEB_PORT = 8000
-WEB_STARTUP_TIMEOUT_SECONDS = 120
+WEB_STARTUP_TIMEOUT_SECONDS = 600  # 【修改】调大到 300 秒（5分钟），留足节点加载时间
 HF_SECRET_NAME = "huggingface-secret"
-# ====================================================================
+# ====================================================
 
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 output_vol = modal.Volume.from_name(OUTPUT_VOLUME_NAME, create_if_missing=True)
@@ -120,7 +121,6 @@ def hf_download_wan22_5b_models():
 
 image = (
     image.env({"HF_XET_HIGH_PERFORMANCE": "1"})
-    # 新增：清理镜像内初始创建的 output 目录，确保 Modal 挂载 Volume 时路径完全为空
     .run_commands("rm -rf /root/comfy/ComfyUI/output")
     .run_function(
         hf_download_wan22_5b_models,
@@ -146,9 +146,14 @@ app = modal.App(name=APP_NAME, image=image)
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
     """启动 ComfyUI Web UI"""
-    # 移除原本的 mkdir 逻辑，避免与 Volume 自动挂载产生冲突
-    subprocess.run(
+    # 【修改】使用 Popen 启动非阻塞子进程
+    process = subprocess.Popen(
         f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT}",
         shell=True,
-        check=True,
     )
+    
+    # 保持进程存活，让 Modal 接管 http 请求转发
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError("ComfyUI server process exited unexpectedly.")
+        time.sleep(1)
