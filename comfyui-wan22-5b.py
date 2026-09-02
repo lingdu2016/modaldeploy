@@ -20,7 +20,7 @@ HF_SECRET_NAME = "huggingface-secret"
 vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 output_vol = modal.Volume.from_name(OUTPUT_VOLUME_NAME, create_if_missing=True)
 
-# 100% 保持你原来的 Image 镜像定义，确保命中底层缓存
+# 保持镜像定义完全不动，确保命中底层缓存
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .env({"DEBIAN_FRONTEND": "noninteractive"})
@@ -133,7 +133,7 @@ app = modal.App(name=APP_NAME, image=image)
 
 
 # =============================================================================
-# 纯净无痛解决 WebSocket 断连重连的 UI 启动逻辑
+# 关闭详细日志与日志推送的启动逻辑
 # =============================================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
@@ -147,9 +147,19 @@ app = modal.App(name=APP_NAME, image=image)
 )
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
-    """借鉴参考仓库的极简原生启动方案"""
-    print(f"🌐 正在启动 ComfyUI Web 界面 (Port: {WEB_PORT})...")
+    """静默启动方案：关闭 WebSocket 日志刷屏"""
+    print(f"🌐 正在以静默模式启动 ComfyUI Web 界面 (Port: {WEB_PORT})...")
     
-    # 直接调用 Python 原生 main.py，屏蔽掉 comfy-cli 可能引发的中间层代理干扰
-    cmd = f"python3 /root/comfy/ComfyUI/main.py --listen 0.0.0.0 --port {WEB_PORT} --disable-auto-launch"
+    # 参数说明：
+    # --dont-print-server: 禁止向前端 Web 界面推送日志消息，防止冲刷 WebSocket 通道
+    # --verbose WARNING: 服务端仅在发生警告或严重错误时才输出日志，屏蔽正常的 INFO 刷屏
+    cmd = (
+        f"python3 /root/comfy/ComfyUI/main.py "
+        f"--listen 0.0.0.0 "
+        f"--port {WEB_PORT} "
+        f"--disable-auto-launch "
+        f"--dont-print-server "
+        f"--verbose WARNING"
+    )
+    
     subprocess.Popen(cmd, shell=True)
