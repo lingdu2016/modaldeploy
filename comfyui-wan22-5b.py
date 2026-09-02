@@ -22,10 +22,12 @@ output_vol = modal.Volume.from_name(OUTPUT_VOLUME_NAME, create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    .env({"DEBIAN_FRONTEND": "noninteractive"})
     .apt_install(
         "git",
         "nano",
-        "libgl1-mesa-glx",
+        "libgl1",        
+        "libglx-mesa0",  
         "libglib2.0-0",
     )
     .pip_install(
@@ -39,7 +41,7 @@ image = (
     )
 )
 
-# 安装您的全部自定义节点列表
+# 安装自定义节点
 image = (
     image
     .run_commands("comfy node install --fast-deps image-resize-comfyui")
@@ -118,6 +120,8 @@ def hf_download_wan22_5b_models():
 
 image = (
     image.env({"HF_XET_HIGH_PERFORMANCE": "1"})
+    # 新增：清理镜像内初始创建的 output 目录，确保 Modal 挂载 Volume 时路径完全为空
+    .run_commands("rm -rf /root/comfy/ComfyUI/output")
     .run_function(
         hf_download_wan22_5b_models,
         volumes={"/cache": vol},
@@ -142,9 +146,7 @@ app = modal.App(name=APP_NAME, image=image)
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
     """启动 ComfyUI Web UI"""
-    Path("/root/comfy/ComfyUI/output").mkdir(parents=True, exist_ok=True)
-    
-    # 将原本的 Popen 改为 run，保证 Modal 服务正常挂载不崩溃
+    # 移除原本的 mkdir 逻辑，避免与 Volume 自动挂载产生冲突
     subprocess.run(
         f"comfy launch -- --listen 0.0.0.0 --port {WEB_PORT}",
         shell=True,
