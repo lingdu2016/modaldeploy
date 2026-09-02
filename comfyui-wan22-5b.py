@@ -158,7 +158,6 @@ def ui():
         f"--listen 0.0.0.0 "
         f"--port {WEB_PORT} "
         f"--disable-auto-launch "
-        f"--dont-print-server "
         f"--verbose WARNING"
     )
     
