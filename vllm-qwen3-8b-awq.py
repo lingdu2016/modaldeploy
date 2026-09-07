@@ -122,7 +122,7 @@ class QwenAWQServer:
             "--quantization", "awq",                    
             "--dtype", "float16",                       
             "--gpu-memory-utilization", "0.85",        
-            "--max-model-len", "5120",
+            "--max-model-len", "2048",
             "--enforce-eager",
             "--host", "0.0.0.0",
             "--port", f"{PORT}",
