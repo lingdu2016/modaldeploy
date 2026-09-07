@@ -1,10 +1,27 @@
 name: Modal Auto Deploy
 
+# -----------------------------------------------------------------
+# 唯一需要修改的地方：取消注释你需要部署的那一行即可
+# -----------------------------------------------------------------
+env:
+  # DEPLOY_FILE: "comfyui-wan22-5b.py"
+  # DEPLOY_FILE: "app.py"
+  # DEPLOY_FILE: "llama.py"
+  DEPLOY_FILE: "vllm-qwen3-8b-awq.py"
+  # DEPLOY_FILE: "llama-Qwen3-14B-Q5-gguf.py"
+  # DEPLOY_FILE: "llama-Qwen35-27B-WebNovelWriter-Q4-gguf.py"
+
+# -----------------------------------------------------------------
+
 on:
   push:
     branches:
-      - main  # 当代码推送到 main 分支时自动触发
-  workflow_dispatch: # 允许在 GitHub 网页端手动点击触发
+      - main
+    paths:
+      # 动态引用上面开启的 DEPLOY_FILE 变量
+      - "${{ env.DEPLOY_FILE }}"
+
+  workflow_dispatch: # 网页端手动触发
 
 jobs:
   deploy:
@@ -13,7 +30,6 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # 如果你使用了 Modal 的多环境功能，可以取消下面这行的注释
       # MODAL_ENVIRONMENT: production 
 
     steps:
@@ -32,10 +48,5 @@ jobs:
 
       - name: Deploy Modal App
         run: |
-          # 将 app.py 替换为你实际的入口文件模块路径
-          #modal deploy app.py
-          #modal deploy llama.py
-          #modal deploy vllm-qwen3-8b-awq.py
-          #modal deploy llama-Qwen3-14B-Q5-gguf.py
-          #modal deploy llama-Qwen35-27B-WebNovelWriter-Q4-gguf.py
-          modal deploy comfyui-wan22-5b.py
+          # 动态执行上方选中的文件
+          modal deploy "${{ env.DEPLOY_FILE }}"
