@@ -1,8 +1,5 @@
 import subprocess
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from modal import App, Image, Volume, web_server, Secret, concurrent
 
@@ -49,9 +46,8 @@ model_volume = Volume.from_name(
 image = (
     Image.from_registry("openmmlab/lmdeploy:v0.7.3-cu12")
     .pip_install(
-        "huggingface_hub[hf_transfer]>=0.30.0,<1.0",  # 解决版本冲突
-        "transformers>=4.51.0",                       # Qwen3 需要
-        "python-dotenv",
+        "huggingface_hub[hf_transfer]>=0.30.0,<1.0",
+        "transformers>=4.51.0",
         "grpclib==0.4.7",
     )
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
@@ -106,5 +102,4 @@ def serve():
     cmd = " ".join(args)
     print("Running command:", cmd)
 
-    # 与原项目保持一致
     subprocess.Popen(cmd, shell=True)
