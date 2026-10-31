@@ -1,7 +1,5 @@
 import modal
 import io
-from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
 
 app = modal.App("edge-tts-web")
 
@@ -10,9 +8,7 @@ image = (
     .pip_install("edge-tts", "fastapi", "python-multipart")
 )
 
-web_app = FastAPI()
-
-# 常用声音（中文优先 + 部分英文）
+# 常用声音
 VOICES = {
     "晓晓（女声·推荐）": "zh-CN-XiaoxiaoNeural",
     "云希（男声·推荐）": "zh-CN-YunxiNeural",
@@ -33,13 +29,19 @@ VOICES = {
     "English - Christopher（男）": "en-US-ChristopherNeural",
 }
 
-@web_app.get("/", response_class=HTMLResponse)
-async def index():
-    voice_options = "".join(
-        [f'<option value="{v}">{k}</option>' for k, v in VOICES.items()]
-    )
+def create_web_app():
+    from fastapi import FastAPI, Form
+    from fastapi.responses import HTMLResponse, StreamingResponse
 
-    return f"""
+    web_app = FastAPI()
+
+    @web_app.get("/", response_class=HTMLResponse)
+    async def index():
+        voice_options = "".join(
+            [f'<option value="{v}">{k}</option>' for k, v in VOICES.items()]
+        )
+
+        return f"""
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -295,60 +297,62 @@ async def index():
 </html>
 """
 
-@web_app.post("/tts")
-async def tts(
-    text: str = Form(...),
-    voice: str = Form(...),
-    rate: str = Form("0"),
-    pitch: str = Form("0"),
-    volume: str = Form("0"),
-):
-    import edge_tts  # 懒加载，避免本地/CI 环境报错
+    @web_app.post("/tts")
+    async def tts(
+        text: str = Form(...),
+        voice: str = Form(...),
+        rate: str = Form("0"),
+        pitch: str = Form("0"),
+        volume: str = Form("0"),
+    ):
+        import edge_tts
 
-    text = text.strip()
-    if not text:
-        return HTMLResponse("文字不能为空", status_code=400)
+        text = text.strip()
+        if not text:
+            return HTMLResponse("文字不能为空", status_code=400)
 
-    if len(text) > 5000:
-        return HTMLResponse("文字过长，请控制在 5000 字以内", status_code=400)
+        if len(text) > 5000:
+            return HTMLResponse("文字过长，请控制在 5000 字以内", status_code=400)
 
-    rate_str = f"{int(rate):+d}%"
-    pitch_str = f"{int(pitch):+d}Hz"
-    volume_str = f"{int(volume):+d}%"
+        rate_str = f"{int(rate):+d}%"
+        pitch_str = f"{int(pitch):+d}Hz"
+        volume_str = f"{int(volume):+d}%"
 
-    try:
-        communicate = edge_tts.Communicate(
-            text,
-            voice,
-            rate=rate_str,
-            pitch=pitch_str,
-            volume=volume_str,
-        )
+        try:
+            communicate = edge_tts.Communicate(
+                text,
+                voice,
+                rate=rate_str,
+                pitch=pitch_str,
+                volume=volume_str,
+            )
 
-        audio_data = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_data += chunk["data"]
+            audio_data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data += chunk["data"]
 
-        if not audio_data:
-            return HTMLResponse("生成失败，未返回音频数据", status_code=500)
+            if not audio_data:
+                return HTMLResponse("生成失败，未返回音频数据", status_code=500)
 
-        return StreamingResponse(
-            io.BytesIO(audio_data),
-            media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": "inline; filename=tts.mp3",
-                "Cache-Control": "no-cache",
-            },
-        )
-    except Exception as e:
-        return HTMLResponse(f"生成出错: {str(e)}", status_code=500)
+            return StreamingResponse(
+                io.BytesIO(audio_data),
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": "inline; filename=tts.mp3",
+                    "Cache-Control": "no-cache",
+                },
+            )
+        except Exception as e:
+            return HTMLResponse(f"生成出错: {str(e)}", status_code=500)
+
+    return web_app
 
 @app.function(
     image=image,
     timeout=120,
-    scaledown_window=30,  # 闲置 30 秒后自动停止
+    scaledown_window=30,
 )
 @modal.asgi_app()
 def fastapi_app():
-    return web_app
+    return create_web_app()
