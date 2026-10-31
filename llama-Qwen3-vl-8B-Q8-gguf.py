@@ -79,7 +79,7 @@ app = modal.App(name="llama-Qwen3-vl-8B-Q8-gguf", image=image)
 # S4: 多模态模型服务 (线程安全锁 + L4 显存安全配置)
 # =============================================================================
 @app.cls(
-    gpu="L4",  # L4 运行 Qwen3-VL 速度极快，16GB~24GB 显存非常充裕
+    gpu="T4",  # L4 运行 Qwen3-VL 速度极快，16GB~24GB 显存非常充裕
     volumes={"/cache": vol},
     scaledown_window=150,
     timeout=600,
@@ -104,7 +104,7 @@ class ModelService:
             model_path=model_path,
             mmproj_path=mmproj_path,
             n_gpu_layers=-1,  # 全量卸载到 GPU 显存
-            n_ctx=16384,      # 上下文长度
+            n_ctx=8192,      # 上下文长度
             n_batch=512,
             flash_attn=True,
             verbose=False,
