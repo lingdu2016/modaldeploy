@@ -1,6 +1,5 @@
 import modal
 import io
-import edge_tts
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
 
@@ -304,6 +303,8 @@ async def tts(
     pitch: str = Form("0"),
     volume: str = Form("0"),
 ):
+    import edge_tts  # 懒加载，避免本地/CI 环境报错
+
     text = text.strip()
     if not text:
         return HTMLResponse("文字不能为空", status_code=400)
@@ -311,7 +312,6 @@ async def tts(
     if len(text) > 5000:
         return HTMLResponse("文字过长，请控制在 5000 字以内", status_code=400)
 
-    # 处理语速、音调、音量参数
     rate_str = f"{int(rate):+d}%"
     pitch_str = f"{int(pitch):+d}Hz"
     volume_str = f"{int(volume):+d}%"
@@ -344,7 +344,11 @@ async def tts(
     except Exception as e:
         return HTMLResponse(f"生成出错: {str(e)}", status_code=500)
 
-@app.function(image=image, timeout=120)
+@app.function(
+    image=image,
+    timeout=120,
+    scaledown_window=30,  # 闲置 30 秒后自动停止
+)
 @modal.asgi_app()
 def fastapi_app():
     return web_app
