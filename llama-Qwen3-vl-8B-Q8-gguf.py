@@ -1,4 +1,4 @@
-# 作用：在 Modal 云端使用 llama.cpp 部署 Qwen/Qwen3-VL-8B-Instruct-GGUF (多模态视觉版) + 网页 + API
+# 作用：在 Modal 云端使用 llama.cpp 部署 Qwen/Qwen3-VL-8B-Instruct-GGUF (多模态视觉版) + 网页 + API测试
 # =============================================================================
 # 部署命令: modal deploy llama-Qwen3-vl-8B-Q8-gguf.py
 # =============================================================================
