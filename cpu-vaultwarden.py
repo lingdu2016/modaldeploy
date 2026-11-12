@@ -1,98 +1,294 @@
+
 import os
 import subprocess
+import time
 import modal
 
-# ====================== 配置区（所有可调参数都在这里） ======================
 
-APP_NAME = "vaultwarden"                              # Modal App 名称
-VOLUME_NAME = "vaultwarden-data"                      # 持久化数据卷名称（数据库、附件、密钥都存在这里）
+# ============================================================
+# 1. 基础配置
+# ============================================================
 
-# 镜像（直接在这里改）
-IMAGE = "vaultwarden/server:latest"                   # 用最新版。想固定版本就改成 "vaultwarden/server:1.37.5"
+APP_NAME = "vaultwarden"                 # Modal App 名称
+VOLUME_NAME = "vaultwarden-data"         # 持久化数据卷名称
 
-WEB_PORT = 80                                         # Vaultwarden 默认端口，一般不用改
-MAX_CONTAINERS = 1                                    # 自用只开 1 个实例
-TIMEOUT_SECONDS = 3600                                # 单个容器最长运行时间（秒）
-SCALEDOWN_WINDOW_SECONDS = 180                        # 无请求后多久自动缩到 0（秒），调大可减少冷启动
-WEB_STARTUP_TIMEOUT_SECONDS = 60                      # 启动超时时间
+# 固定 Vaultwarden 版本，避免 latest 自动更新造成意外
+IMAGE = "vaultwarden/server:1.37.5"
 
-# 可选 Secret 名称（不存在也不会报错）
-# 推荐把敏感配置放到 Secret 里管理，而不是写死在代码中
-# 创建示例：
-# modal secret create vaultwarden-secret \
-#   VW_DOMAIN=https://你的真实地址.modal.run \
-#   VW_ADMIN_TOKEN=你的token \
-#   VW_SIGNUPS_ALLOWED=true
-SECRET_NAME = "vaultwarden-secret"
+WEB_PORT = 80                            # Vaultwarden 容器内部监听端口
 
-# ---------- 环境变量说明（全部使用 VW_ 前缀） ----------
-# VW_DOMAIN              ：必须设置！最终访问的完整 HTTPS 地址（部署后才能知道真实地址）
-# VW_ADMIN_TOKEN         ：管理后台 /admin 的密码（可选，不设置更安全）
-# VW_SIGNUPS_ALLOWED     ：是否允许公开注册（true / false）。创建完自己的账号后建议改成 false
-# VW_INVITATIONS_ALLOWED ：是否允许通过邀请注册（一般保持 false）
+MAX_CONTAINERS = 1                       # 最多运行 1 个容器
 
-# ====================================================
+TIMEOUT_SECONDS = 3600                   # 单次函数最长运行时间（秒）
+SCALEDOWN_WINDOW_SECONDS = 180           # 空闲 180 秒后允许缩容
+WEB_STARTUP_TIMEOUT_SECONDS = 120        # 等待 Web 服务启动的最长时间
 
-# 创建或获取持久化卷
-vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+SECRET_NAME = "vaultwarden-secret"       # Modal 中预先创建的 Secret 名称
 
-# 构建镜像
+
+# ============================================================
+# 2. Secret 环境变量说明
+# ============================================================
+#
+# 在 Modal 的 Secrets 页面创建 vaultwarden-secret。
+#
+# 需要设置：
+#
+# VW_DOMAIN              = https://你的实际Modal域名
+# VW_SIGNUPS_ALLOWED     = true 或 false
+# VW_INVITATIONS_ALLOWED = true 或 false
+#
+# 可选设置：
+#
+# VW_ADMIN_TOKEN         = Argon2id 格式的管理员密码哈希
+#
+# 注意：
+# 1. 第一次注册自己的账号时，VW_SIGNUPS_ALLOWED=true。
+# 2. 注册成功后改为 false，关闭公开注册。
+# 3. 不需要 /admin 管理后台时，不设置 VW_ADMIN_TOKEN。
+# 4. 不要把普通用户的登录密码写进代码或 Secret。
+# 5. Secret 必须提前创建，否则部署会报错。
+#
+# ============================================================
+
+
+# ============================================================
+# 3. 创建持久化数据卷
+# ============================================================
+
+# Vaultwarden 的数据库、附件、密钥等数据保存在 /data。
+# Modal Volume 用于持久化保存这些数据。
+#
+# 不要随意删除这个 Volume，否则可能丢失账号数据。
+
+vol = modal.Volume.from_name(
+    VOLUME_NAME,
+    create_if_missing=True,
+)
+
+
+# ============================================================
+# 4. 构建容器镜像
+# ============================================================
+
+# 使用 Vaultwarden 官方 Docker 镜像。
+# 添加 Python 3.11，以便运行 Modal Python 启动代码。
+# Vaultwarden 本身仍然由官方镜像中的 /start.sh 启动。
+
 image = modal.Image.from_registry(
     IMAGE,
-    add_python="3.11",        # 保证有 Python 环境（虽然主要跑的是 Rust 二进制）
+    add_python="3.11",
 )
 
-app = modal.App(name=APP_NAME, image=image)
 
+# 创建 Modal App
+app = modal.App(
+    name=APP_NAME,
+    image=image,
+)
+
+
+# ============================================================
+# 5. 环境变量布尔值检查函数
+# ============================================================
+
+def get_bool_env(name: str, default: str) -> str:
+    """
+    读取布尔环境变量。
+
+    只接受 true 或 false。
+    如果填写其他内容，直接报错，避免 Vaultwarden 忽略无效配置。
+    """
+
+    value = os.environ.get(name, default).strip().lower()
+
+    if value not in ("true", "false"):
+        raise ValueError(
+            f"{name} 必须填写 true 或 false，当前值：{value!r}"
+        )
+
+    return value
+
+
+# ============================================================
+# 6. 启动 Vaultwarden Web 服务
+# ============================================================
 
 @app.function(
+    # 最多运行的容器数量
     max_containers=MAX_CONTAINERS,
-    cpu=0.25,                             # 最低可到 0.125，给 0.25 更稳一点
-    memory=512,                           # 实际空闲大约 50~150MB，给 512 留余量
-    volumes={"/data": vol},               # 把数据卷挂载到容器的 /data 目录
+
+    # CPU 配额
+    cpu=0.25,
+
+    # 内存配额，单位 MB
+    memory=512,
+
+    # 将 Modal 持久化卷挂载到容器的 /data
+    volumes={
+        "/data": vol,
+    },
+
+    # 函数最长运行时间
     timeout=TIMEOUT_SECONDS,
+
+    # 空闲后自动缩容的等待时间
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
-    secrets=[modal.Secret.from_name(SECRET_NAME)],  # 必须先在modal添加环境变量
+
+    # 加载预先创建的 Secret
+    secrets=[
+        modal.Secret.from_name(SECRET_NAME),
+    ],
 )
-@modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
+@modal.web_server(
+    WEB_PORT,
+    startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
+)
 def ui():
-    """启动 Vaultwarden 服务"""
-    print("🚀 正在启动 Vaultwarden...")
+    """
+    启动 Vaultwarden。
 
-    # 读取环境变量（优先读 Secret 里的值，没有就用代码默认值）
-    domain = os.environ.get("VW_DOMAIN", "https://请部署后替换成真实地址.modal.run")
-    admin_token = os.environ.get("VW_ADMIN_TOKEN", "")
-    signups_allowed = os.environ.get("VW_SIGNUPS_ALLOWED", "true")
-    invitations_allowed = os.environ.get("VW_INVITATIONS_ALLOWED", "false")
+    Modal 会等待 WEB_PORT 对应的 HTTP 服务就绪。
+    """
 
-    # 组装真正传给 Vaultwarden 的环境变量
+    print("======================================", flush=True)
+    print("正在启动 Vaultwarden...", flush=True)
+    print("======================================", flush=True)
+
+    # --------------------------------------------------------
+    # 6.1 读取 Secret 中的配置
+    # --------------------------------------------------------
+
+    domain = os.environ.get(
+        "VW_DOMAIN",
+        "",
+    ).strip()
+
+    admin_token = os.environ.get(
+        "VW_ADMIN_TOKEN",
+        "",
+    ).strip()
+
+    # 是否允许公开注册
+    # 默认 false，避免意外开放注册
+    signups_allowed = get_bool_env(
+        "VW_SIGNUPS_ALLOWED",
+        "false",
+    )
+
+    # 是否允许邀请注册
+    # 默认 false
+    invitations_allowed = get_bool_env(
+        "VW_INVITATIONS_ALLOWED",
+        "false",
+    )
+
+    # 检查域名配置
+    if not domain.startswith("https://"):
+        raise ValueError(
+            "VW_DOMAIN 未正确设置！"
+            "请填写完整的 HTTPS 地址，例如 https://example.modal.run"
+        )
+
+    # --------------------------------------------------------
+    # 6.2 组装 Vaultwarden 环境变量
+    # --------------------------------------------------------
+
+    # 复制当前容器环境变量
     env = os.environ.copy()
+
+    # 清除可能继承的旧管理员 Token
+    # 避免空字符串被传给 Vaultwarden
+    env.pop("ADMIN_TOKEN", None)
+
+    # Vaultwarden 官方程序识别的环境变量
     env.update({
-        "DOMAIN": domain,                             # 必须是最终访问的 HTTPS 地址
-        "ADMIN_TOKEN": admin_token,                   # 管理后台 /admin 的密码
-        "SIGNUPS_ALLOWED": signups_allowed,           # 是否允许公开注册
-        "INVITATIONS_ALLOWED": invitations_allowed,   # 是否允许邀请注册
+
+        # 对外访问的 HTTPS 地址
+        "DOMAIN": domain,
+
+        # 是否允许公开注册
+        "SIGNUPS_ALLOWED": signups_allowed,
+
+        # 是否允许邀请注册
+        "INVITATIONS_ALLOWED": invitations_allowed,
+
+        # 不显示密码提示
         "SHOW_PASSWORD_HINT": "false",
-        "ROCKET_ADDRESS": "0.0.0.0",                  # 必须监听 0.0.0.0，否则外部访问不到
+
+        # 监听所有网络接口
+        "ROCKET_ADDRESS": "0.0.0.0",
+
+        # Vaultwarden 内部监听端口
         "ROCKET_PORT": str(WEB_PORT),
-        "LOG_LEVEL": "warn",                          # 减少日志噪音
+
+        # 使用 info 级别日志，方便排查启动问题
+        "LOG_LEVEL": "info",
+
+        # 数据存储目录
+        "DATA_FOLDER": "/data",
     })
 
-    print(f"📌 当前 DOMAIN = {domain}")
-    if not admin_token:
-        print("⚠️  未设置 VW_ADMIN_TOKEN，管理后台 /admin 将无法使用（更安全）")
+    # 只有设置了管理员 Token，才启用管理后台
+    if admin_token:
+        env["ADMIN_TOKEN"] = admin_token
+        print("已设置管理员 Token，管理后台已配置。", flush=True)
     else:
-        print("✅ 已设置 ADMIN_TOKEN，可访问 /admin")
+        print(
+            "未设置管理员 Token，/admin 管理后台不可用。",
+            flush=True,
+        )
 
-    # 启动官方入口脚本
+    # --------------------------------------------------------
+    # 6.3 输出启动配置
+    # --------------------------------------------------------
+
+    print(f"访问域名：{domain}", flush=True)
+    print(f"公开注册：{signups_allowed}", flush=True)
+    print(f"邀请注册：{invitations_allowed}", flush=True)
+    print("数据目录：/data", flush=True)
+    print(f"监听端口：{WEB_PORT}", flush=True)
+
+    # --------------------------------------------------------
+    # 6.4 启动 Vaultwarden 官方入口脚本
+    # --------------------------------------------------------
+
+    # 不要使用 shell=True。
+    # 不要在这里循环读取 stdout。
+    #
+    # stdout 和 stderr 继承当前容器的输出流，
+    # Modal 可以收集子进程输出的日志。
+
     process = subprocess.Popen(
         ["/start.sh"],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
     )
 
-    # 实时输出容器日志，方便排查问题
-    for line in process.stdout:
-        print(line, end="")
+    print(
+        f"Vaultwarden 子进程已启动，PID：{process.pid}",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # 6.5 检查进程是否立即退出
+    # --------------------------------------------------------
+
+    # 给 Vaultwarden 一点启动时间。
+    # 如果进程立即退出，主动抛出错误，方便查看部署日志。
+
+    time.sleep(2)
+
+    return_code = process.poll()
+
+    if return_code is not None:
+        raise RuntimeError(
+            f"Vaultwarden 启动失败，进程退出代码：{return_code}"
+        )
+
+    print(
+        "Vaultwarden 进程仍在运行，等待 Modal 检查 Web 服务端口。",
+        flush=True,
+    )
+
+    # 函数返回后，Modal 的 web_server 会继续检查 HTTP 服务是否就绪。
+    # 不要在这里使用 while True 或循环读取 stdout。
