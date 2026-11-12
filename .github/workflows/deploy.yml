@@ -43,6 +43,9 @@ jobs:
           # modal deploy lmdeploy-qwen3-8b-awq.py
           # modal deploy llama-Qwen3-14B-Q5-gguf.py
           # modal deploy llama-Qwen35-27B-WebNovelWriter-Q4-gguf.py
-          modal deploy llama-Qwen3-vl-8B-Q8-gguf.py
+          # modal deploy llama-Qwen3-vl-8B-Q8-gguf.py  #没有部署
+          #####gpu限制，需要gpu的无法部署，下面是cpu部署的项目
           # modal deploy edge_tts_web.py
+          modal deploy cpu-vaultwarden  ##个人密码保存
+  
 
