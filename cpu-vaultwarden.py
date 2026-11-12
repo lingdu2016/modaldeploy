@@ -52,7 +52,7 @@ app = modal.App(name=APP_NAME, image=image)
     volumes={"/data": vol},               # 把数据卷挂载到容器的 /data 目录
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
-    secrets=[modal.Secret.from_name(SECRET_NAME, required=False)],  # 可选 Secret
+    secrets=[modal.Secret.from_name(SECRET_NAME)],  # 必须先在modal添加环境变量
 )
 @modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
 def ui():
