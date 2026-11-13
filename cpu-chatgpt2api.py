@@ -4,49 +4,68 @@ import time
 import modal
 
 # ====================== 配置区（所有可调参数都在这里） ======================
-APP_NAME = "chatgpt2api"                              # Modal App 名称
-VOLUME_NAME = "chatgpt2api-data"                      # 持久化数据卷名称
+APP_NAME = "chatgpt2api"
+VOLUME_NAME = "chatgpt2api-data"
 
-# 镜像配置（与官方 Compose 默认一致）
-IMAGE = "ghcr.io/yukkcat/chatgpt2api:latest"
-WEB_PORT = 80                                         # 官方 CMD 监听 80
+# 建议固定版本，避免 :latest 变了导致镜像层重建
+# 可到 https://github.com/yukkcat/chatgpt2api/pkgs/container/chatgpt2api 看最新 tag
+IMAGE = "ghcr.io/yukkcat/chatgpt2api:latest"   # 或改成你需要的 tag；不要用 latest 更稳
+WEB_PORT = 80
 
-MAX_CONTAINERS = 1                                    # 最多 1 个容器
-MAX_CONCURRENT_INPUTS = 10                            # 单容器并发输入
-TIMEOUT_SECONDS = 3600                                # 单次函数最长运行时间（秒）
-SCALEDOWN_WINDOW_SECONDS = 300                        # 空闲后缩容等待
-WEB_STARTUP_TIMEOUT_SECONDS = 180                     # Web 启动等待
+MAX_CONTAINERS = 1
+MAX_CONCURRENT_INPUTS = 10
+TIMEOUT_SECONDS = 3600
+SCALEDOWN_WINDOW_SECONDS = 300
+WEB_STARTUP_TIMEOUT_SECONDS = 180
 
-# 资源（比 Vaultwarden 加大）
 CPU = 0.5
 MEMORY_MB = 1536
 
-# Modal Secret 名称（必须提前创建）
 SECRET_NAME = "chatgpt2api-secret"
-
-# ---------- 环境变量说明（对齐官方） ----------
-# CHATGPT2API_AUTH_KEY      ：必填，管理后台 & 默认 API Key
-# CHATGPT2API_BASE_URL      ：可选，仅用于生成图片/文件对外 URL
-# CHATGPT2API_THREAD_TOKENS ：可选，默认 120；自用可调低省内存
-# DATABASE_URL              ：可选，不设则用 SQLite data/chatgpt2api.db
 # ====================================================
 
 
 # ====================================================
-# 1. 持久化数据卷
+# 1. 持久化数据卷（只存业务数据，不存运行时代码）
 # ====================================================
-# 官方业务数据在 /app/data
-# 不要删除这个 Volume，否则可能丢账号和数据库
 vol = modal.Volume.from_name(
     VOLUME_NAME,
     create_if_missing=True,
 )
 
 # ====================================================
-# 2. 镜像
+# 2. 镜像：官方镜像 + 构建期预热 /app（真正的镜像缓存）
 # ====================================================
-# 官方镜像已是 python:3.13-slim，不要再 add_python
-image = modal.Image.from_registry(IMAGE)
+# 构建时做一次和 entrypoint 相同的 seed + uv sync，
+# 结果写进镜像层；之后冷启动直接用缓存，不再每次装 32 个包。
+image = (
+    modal.Image.from_registry(IMAGE)
+    # 避免官方 ENTRYPOINT 干扰 Modal 自己的 Python 启动
+    .entrypoint([])
+    .run_commands(
+        # 与官方 docker-entrypoint.sh 对齐：把种子拷到 /app 并同步依赖
+        "set -eu; "
+        "seed_root=/opt/chatgpt2api; "
+        "runtime_root=/app; "
+        "seed_version=$(tr -d '\\r\\n' < \"${seed_root}/VERSION\"); "
+        "mkdir -p \"${runtime_root}\"; "
+        # 清空 /app 里除 data 外的内容（构建时一般没有 data）
+        "find \"${runtime_root}\" -mindepth 1 -maxdepth 1 "
+        "! -name data -exec rm -rf -- {} + 2>/dev/null || true; "
+        # 拷贝种子（跳过 .venv，依赖后面 uv sync 生成）
+        "for source in \"${seed_root}\"/* \"${seed_root}\"/.[!.]* \"${seed_root}\"/..?*; do "
+        "  [ -e \"$source\" ] || continue; "
+        "  [ \"$(basename \"$source\")\" = \".venv\" ] && continue; "
+        "  cp -a \"$source\" \"${runtime_root}/\"; "
+        "done; "
+        "printf '%s\\n' \"${seed_version}\" > \"${runtime_root}/.chatgpt2api-image-version\"; "
+        "cd \"${runtime_root}\"; "
+        "uv sync --frozen --no-dev --no-install-project; "
+        # 把项目本身也装进 venv，避免运行时 uv run 再 Building/Installed
+        "uv pip install --no-deps -e . || uv pip install --no-deps .; "
+        "echo \"[modal-image] /app prewarm done, version=${seed_version}\"",
+    )
+)
 
 app = modal.App(
     name=APP_NAME,
@@ -80,9 +99,6 @@ def ui():
     print("正在启动 chatgpt2api...", flush=True)
     print("======================================", flush=True)
 
-    # ------------------------------------------------
-    # 3.1 读取 Secret（只强制校验官方必填项）
-    # ------------------------------------------------
     auth_key = os.environ.get("CHATGPT2API_AUTH_KEY", "").strip()
     base_url = os.environ.get("CHATGPT2API_BASE_URL", "").strip()
     thread_tokens = os.environ.get("CHATGPT2API_THREAD_TOKENS", "40").strip()
@@ -92,8 +108,6 @@ def ui():
             "CHATGPT2API_AUTH_KEY 未设置。官方要求必填，请在 Modal Secret 中配置。"
         )
 
-    # BASE_URL 可选：官方说明用于生成图片/文件 URL
-    # 不填时使用当前服务地址，文本对话不受影响
     if base_url and not (
         base_url.startswith("http://") or base_url.startswith("https://")
     ):
@@ -101,44 +115,45 @@ def ui():
             "CHATGPT2API_BASE_URL 若填写，须是完整 http(s) 地址。"
         )
 
-    # ------------------------------------------------
-    # 3.2 组装环境变量（对齐官方 docker-compose）
-    # ------------------------------------------------
     env = os.environ.copy()
     env["CHATGPT2API_AUTH_KEY"] = auth_key
     env["CHATGPT2API_THREAD_TOKENS"] = thread_tokens
     env["TZ"] = os.environ.get("TZ", "Asia/Shanghai")
-
-    # 明确指向 Volume 内 SQLite（官方未设 DATABASE_URL 时默认 data/chatgpt2api.db）
     env["DATABASE_URL"] = "sqlite:////app/data/chatgpt2api.db"
 
     if base_url:
         env["CHATGPT2API_BASE_URL"] = base_url
     else:
-        # 不传时让程序走官方默认：当前服务地址
         env.pop("CHATGPT2API_BASE_URL", None)
 
-    # ------------------------------------------------
-    # 3.3 启动信息
-    # ------------------------------------------------
-    print(f"AUTH_KEY：已设置", flush=True)
+    print("AUTH_KEY：已设置", flush=True)
     print(
         f"BASE_URL：{base_url if base_url else '(未设置，使用当前服务地址)'}",
         flush=True,
     )
     print(f"THREAD_TOKENS：{thread_tokens}", flush=True)
     print(f"DATABASE_URL：{env['DATABASE_URL']}", flush=True)
-    print(f"数据目录：/app/data", flush=True)
+    print("数据目录：/app/data", flush=True)
     print(f"监听端口：{WEB_PORT}", flush=True)
     print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
 
-    # ------------------------------------------------
-    # 3.4 按官方 ENTRYPOINT + CMD 启动
-    # ------------------------------------------------
-    # ENTRYPOINT ["chatgpt2api-entrypoint"]
-    # CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--access-log"]
-    process = subprocess.Popen(
-        [
+    # 优先用镜像里已预热的 venv，避免 uv run 再次装包/构建
+    uvicorn_bin = "/app/.venv/bin/uvicorn"
+    if os.path.isfile(uvicorn_bin):
+        cmd = [
+            uvicorn_bin,
+            "main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(WEB_PORT),
+            "--access-log",
+        ]
+        cwd = "/app"
+        print("启动方式：预热 venv 直接 uvicorn（跳过运行时 uv sync）", flush=True)
+    else:
+        # 回退：走官方 entrypoint（仍会 uv sync，但镜像已预热时通常很快）
+        cmd = [
             "chatgpt2api-entrypoint",
             "uv",
             "run",
@@ -149,15 +164,14 @@ def ui():
             "--port",
             str(WEB_PORT),
             "--access-log",
-        ],
-        env=env,
-    )
+        ]
+        cwd = None
+        print("启动方式：官方 entrypoint（回退）", flush=True)
+
+    process = subprocess.Popen(cmd, env=env, cwd=cwd)
 
     print(f"进程已启动，PID：{process.pid}", flush=True)
 
-    # ------------------------------------------------
-    # 3.5 检查是否立即退出
-    # ------------------------------------------------
     time.sleep(3)
     return_code = process.poll()
     if return_code is not None:
