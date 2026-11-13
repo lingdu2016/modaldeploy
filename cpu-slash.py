@@ -10,12 +10,14 @@ import modal
 APP_NAME = "slash"
 VOLUME_NAME = "slash-data"
 
-# 固定使用稳定版本，避免 latest 更新造成意外变化
+# 固定使用官方镜像
 IMAGE = "yourselfhosted/slash:latest"
 
 # ---------- 服务配置 ----------
 WEB_PORT = 5231
 DATA_DIR = "/var/opt/slash"
+WORK_DIR = "/usr/local/slash"
+SLASH_EXECUTABLE = "./slash"
 
 # ---------- Modal 资源配置 ----------
 MAX_CONTAINERS = 1
@@ -32,22 +34,33 @@ WEB_STARTUP_TIMEOUT_SECONDS = 120
 SLASH_MODE = "prod"
 SLASH_DRIVER = "sqlite"
 
+# ---------- 时区配置 ----------
+TIMEZONE = "Asia/Shanghai"
+
 # ====================================================
 
 
 # ====================== 创建 Modal 资源 ======================
 
 # 创建持久化 Volume
-# Slash 的数据库及其他持久化数据保存在这里
+# Slash 的 SQLite 数据库保存在 /var/opt/slash
 vol = modal.Volume.from_name(
     VOLUME_NAME,
     create_if_missing=True
 )
 
-# 使用官方 Docker 镜像，并添加 Python 供 Modal 执行部署代码
+# 使用 Slash 官方 Alpine 镜像
+# 不再使用 add_python，避免之前出现的 Python 版本识别错误
+#
+# 在 Alpine 中安装 Python 和 pip
+# 并创建 python、pip 命令软链接，满足 Modal 的运行环境要求
 image = modal.Image.from_registry(
     IMAGE,
-    add_python="3.11"
+    setup_dockerfile_commands=[
+        "RUN apk add --no-cache python3 py3-pip",
+        "RUN ln -sf /usr/bin/python3 /usr/bin/python",
+        "RUN ln -sf /usr/bin/pip3 /usr/bin/pip",
+    ],
 )
 
 # 创建 Modal App
@@ -87,28 +100,28 @@ def ui():
     env = os.environ.copy()
 
     env.update({
-        # 使用生产模式
+        # Slash 生产模式
         "SLASH_MODE": SLASH_MODE,
 
-        # 设置监听端口
+        # Slash 监听端口
         "SLASH_PORT": str(WEB_PORT),
 
-        # 设置数据目录
+        # Slash 数据目录
         "SLASH_DATA": DATA_DIR,
 
         # 使用 SQLite 数据库
         "SLASH_DRIVER": SLASH_DRIVER,
 
         # 设置时区
-        "TZ": "Asia/Shanghai",
+        "TZ": TIMEZONE,
     })
 
     # ---------- 启动 Slash ----------
     print("正在启动 Slash...")
 
     process = subprocess.Popen(
-        ["/usr/local/slash/slash"],
-        cwd="/usr/local/slash",
+        [SLASH_EXECUTABLE],
+        cwd=WORK_DIR,
         env=env
     )
 
@@ -127,7 +140,7 @@ def ui():
                 f"Slash 启动失败，退出代码：{exit_code}"
             )
 
-        # 检查 5231 端口是否已经开始监听
+        # 检查服务端口是否已经开始监听
         try:
             with socket.create_connection(
                 ("127.0.0.1", WEB_PORT),
