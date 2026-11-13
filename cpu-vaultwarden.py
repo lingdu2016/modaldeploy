@@ -19,7 +19,7 @@ MAX_CONTAINERS = 1                                    # 最多运行 1 个容器
 MAX_CONCURRENT_INPUTS = 20                            # 单个容器最多同时处理 20 个输入
 
 TIMEOUT_SECONDS = 3600                                # 单次函数调用最长运行时间（秒）
-SCALEDOWN_WINDOW_SECONDS = 180                        # 空闲 180 秒后允许缩容
+SCALEDOWN_WINDOW_SECONDS = 66                        # 空闲 180 秒后允许缩容
 WEB_STARTUP_TIMEOUT_SECONDS = 120                      # Web 服务启动等待时间（秒）
 
 # Modal Secret 名称
@@ -100,8 +100,8 @@ def get_bool_env(name: str, default: str) -> str:
 
 @app.function(
     max_containers=MAX_CONTAINERS,                   # 最多一个容器，避免额外启动实例
-    cpu=0.25,                                         # CPU 配额
-    memory=512,                                       # 内存配额，单位 MB
+    cpu=0.125,                                         # CPU 配额
+    memory=256,                                       # 内存配额，单位 MB
     volumes={"/data": vol},                           # 挂载持久化数据卷
     timeout=TIMEOUT_SECONDS,                         # 函数调用最长运行时间
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,        # 空闲缩容等待时间
