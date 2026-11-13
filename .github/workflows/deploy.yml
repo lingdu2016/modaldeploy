@@ -46,6 +46,7 @@ jobs:
           # modal deploy llama-Qwen3-vl-8B-Q8-gguf.py  #没有部署
           #####gpu限制，需要gpu的无法部署，下面是cpu部署的项目
           # modal deploy edge_tts_web.py
-          modal deploy cpu-vaultwarden.py  ##个人密码保存
+          # modal deploy cpu-vaultwarden.py  ##个人密码保存
+          modal deploy cpu-slash.py  ##长链接转短链接
   
 
