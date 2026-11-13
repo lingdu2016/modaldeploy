@@ -42,20 +42,16 @@ vol = modal.Volume.from_name(
     create_if_missing=True,
 )
 
-
 # ====================================================
 # 2. 镜像
 # ====================================================
-image = modal.Image.from_registry(
-    IMAGE,
-    add_python="3.11",
-)
+# 官方镜像已是 python:3.13-slim，不要再 add_python
+image = modal.Image.from_registry(IMAGE)
 
 app = modal.App(
     name=APP_NAME,
     image=image,
 )
-
 
 # ====================================================
 # 3. 启动 chatgpt2api
