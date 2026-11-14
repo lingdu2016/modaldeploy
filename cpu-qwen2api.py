@@ -120,7 +120,7 @@ def ui():
 
     # 推荐用 file，账号等会落到挂载的 /app/data
     # 不写的话官方默认是 none（重启就丢）
-    env["DATA_SAVE_MODE"] = os.environ.get("DATA_SAVE_MODE", "file")
+    env["DATA_SAVE_MODE"] = os.environ.get("DATA_SAVE_MODE", "file")    
 
     # ------------------------------------------------
     # 3.3 启动信息
