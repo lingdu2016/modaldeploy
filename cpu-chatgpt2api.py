@@ -1,164 +1,271 @@
+
 import os
-import subprocess
 import time
+import socket
+import subprocess
 import modal
 
 # ====================== 配置区（所有可调参数都在这里） ======================
-APP_NAME = "qwen2api"                                 # Modal App 名称
-VOLUME_NAME = "qwen2api-data"                         # 持久化数据卷名称
 
-# 镜像配置（官方 Docker Hub 镜像，Alpine 单静态二进制，约 46MB）
-IMAGE = "rfym21/qwen2api:latest"
-WEB_PORT = 3000                                       # 官方默认 SERVICE_PORT=3000
+APP_NAME = "qwen2api-go"
+VOLUME_NAME = "qwen2api-go-data"
 
-MAX_CONTAINERS = 1                                    # 自用最多 1 个容器
-MAX_CONCURRENT_INPUTS = 10                            # 单容器并发输入
-TIMEOUT_SECONDS = 3600                                # 单次函数最长运行时间（秒）
-SCALEDOWN_WINDOW_SECONDS = 300                        # 空闲后缩容等待
-WEB_STARTUP_TIMEOUT_SECONDS = 180                     # Web 启动等待
+# 官方 GHCR 镜像
+# 固定使用官方 README 提供的 0.2.0 版本
+IMAGE = "ghcr.io/xxxxteam/qwen2api_go:0.2.0"
 
-# 资源（官方镜像很轻，自用可低配）
-CPU = 0.25                                            # 0.25 核足够
-MEMORY_MB = 512                                       # 512MB 足够，紧张再提到 768
+# ---------- 服务配置 ----------
+WEB_PORT = 3000
 
-# Modal Secret 名称（必须提前创建）
+MAX_CONTAINERS = 1
+MAX_CONCURRENT_INPUTS = 5
+
+TIMEOUT_SECONDS = 3600
+SCALEDOWN_WINDOW_SECONDS = 300
+WEB_STARTUP_TIMEOUT_SECONDS = 300
+
+# ---------- 启动检测 ----------
+STARTUP_CHECK_TIMEOUT_SECONDS = 180
+STARTUP_CHECK_INTERVAL_SECONDS = 1
+
+# ---------- 资源配置 ----------
+# 个人自用，先使用相对保守的配置
+CPU = 0.5
+MEMORY_MB = 768
+
+# ---------- Modal Secret ----------
+# Secret 中至少需要 API_KEY
 SECRET_NAME = "qwen2api-secret"
 
-# ---------- 环境变量说明（严格按官方行为） ----------
-# 名称                  是否必须写进环境变量/Secret          作用
-# ---------------------------------------------------------------------------
-# API_KEY               【唯一强制必填】                     访问密钥。第一个=管理员（可登录管理面板），后面的=普通（只能调 API）
-# DATA_SAVE_MODE        建议填写（推荐 file）               数据持久化方式：none=不存 / file=存到 /app/data / redis=用 Redis
-# ACCOUNTS              可不写（部署后进面板添加）           账号。格式：email:password 或 email:password|proxy_url，多个用逗号
-# OUTPUT_THINK          可不写（面板可改）                  是否输出思考过程 true/false
-# SEARCH_INFO_MODE      可不写（面板可改）                  搜索结果展示 table / text
-# CACHE_MODE            可不写（面板可改）                  图片缓存 default=内存 / file=落盘
-# SERVICE_PORT          代码里已写死 3000，一般不用再写      服务端口
-# LISTEN_ADDRESS        代码里已写死 0.0.0.0，一般不用再写   监听地址（容器内必须是 0.0.0.0）
-# ====================================================
-
 
 # ====================================================
-# 1. 持久化数据卷
+# 1. 创建持久化数据卷
 # ====================================================
-# 官方 Docker Compose 把数据挂到 /app/data
-# DATA_SAVE_MODE=file 时，账号和配置会写到这里
-# 不要随便删这个 Volume，否则可能丢账号
+
+# 官方 Docker Compose 数据目录：
+# ./data:/app/data
+#
+# Modal 将 /app/data 映射到持久化 Volume。
+# 账号、Token、会话映射保存在 Volume 中。
+#
+# 不要删除这个 Volume，否则会丢失保存的数据。
+
 vol = modal.Volume.from_name(
     VOLUME_NAME,
     create_if_missing=True,
 )
 
+
 # ====================================================
-# 2. 镜像
+# 2. 创建运行镜像
 # ====================================================
-# 官方镜像是 Alpine，没有 Python
-# Modal Function 必须能检测到 Python，所以用 apk 安装
+
+# 官方镜像最终运行环境为 Alpine 3.22。
+# Modal Function 需要 Python 运行环境，
+# 所以仅额外安装 Python 3，不安装 Go 和 Node.js。
+
 image = (
     modal.Image.from_registry(IMAGE)
     .dockerfile_commands(
-        "RUN apk add --no-cache python3 py3-pip",
+        "RUN apk add --no-cache python3",
         "RUN ln -sf /usr/bin/python3 /usr/bin/python",
     )
 )
+
+
+# ====================================================
+# 3. 创建 Modal App
+# ====================================================
 
 app = modal.App(
     name=APP_NAME,
     image=image,
 )
 
+
 # ====================================================
-# 3. 启动 qwen2api
+# 4. 启动 Qwen2API_Go
 # ====================================================
+
 @app.function(
+    # 最多运行一个容器
     max_containers=MAX_CONTAINERS,
+
+    # CPU 和内存
     cpu=CPU,
     memory=MEMORY_MB,
-    volumes={"/app/data": vol},                       # 官方数据目录
+
+    # 持久化数据目录
+    volumes={
+        "/app/data": vol,
+    },
+
+    # 函数最长运行时间
     timeout=TIMEOUT_SECONDS,
+
+    # 空闲 300 秒后允许缩容
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
+
+    # 读取 Modal Secret
     secrets=[
         modal.Secret.from_name(SECRET_NAME),
     ],
 )
+
+# 单容器最大并发输入
 @modal.concurrent(
     max_inputs=MAX_CONCURRENT_INPUTS,
 )
+
+# Modal Web Server
 @modal.web_server(
     WEB_PORT,
     startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
+    requires_proxy_auth=False,
 )
+
 def ui():
-    """启动 Qwen2API（官方二进制入口）。"""
-    print("======================================", flush=True)
-    print("正在启动 Qwen2API...", flush=True)
-    print("======================================", flush=True)
+
+    print("=" * 50, flush=True)
+    print("正在启动 Qwen2API_Go...", flush=True)
+    print("=" * 50, flush=True)
 
     # ------------------------------------------------
-    # 3.1 只强制校验官方真正必填的项
+    # 4.1 检查管理员密钥
     # ------------------------------------------------
+
     api_key = os.environ.get("API_KEY", "").strip()
 
     if not api_key:
         raise ValueError(
-            "API_KEY 未设置。"
-            "这是官方唯一强制必填项，请在 Modal Secret 中配置。"
-            "第一个密钥为管理员，可登录管理面板。"
+            "API_KEY 未设置！"
+            "请检查 Modal Secret："
+            + SECRET_NAME
         )
 
     # ------------------------------------------------
-    # 3.2 组装环境变量（尽量少写）
+    # 4.2 组装环境变量
     # ------------------------------------------------
+
     env = os.environ.copy()
 
-    # 必填
+    # 管理员密钥
     env["API_KEY"] = api_key
 
-    # 服务配置（容器内固定写法）
-    env["SERVICE_PORT"] = str(WEB_PORT)
+    # 服务监听地址
     env["LISTEN_ADDRESS"] = "0.0.0.0"
 
-    # 推荐用 file，账号等会落到挂载的 /app/data
-    # 不写的话官方默认是 none（重启就丢）
-    env["DATA_SAVE_MODE"] = os.environ.get("DATA_SAVE_MODE", "file")
+    # 服务监听端口
+    env["SERVICE_PORT"] = str(WEB_PORT)
+
+    # 使用文件持久化
+    # 账号、Token、会话映射保存到 /app/data
+    env["DATA_SAVE_MODE"] = "file"
+
+    # 官方 Qwen 上游地址
+    env["QWEN_CHAT_PROXY_URL"] = "https://chat.qwen.ai"
+
+    # 自用保持默认思考输出关闭
+    env["OUTPUT_THINK"] = "false"
+
+    # 日志等级
+    env["LOG_LEVEL"] = "INFO"
 
     # ------------------------------------------------
-    # 3.3 启动信息
+    # 4.3 输出启动配置
     # ------------------------------------------------
-    print(f"API_KEY：已设置（第一个为管理员密钥）", flush=True)
-    print(f"DATA_SAVE_MODE：{env['DATA_SAVE_MODE']}", flush=True)
-    print(f"数据目录：/app/data", flush=True)
-    print(f"监听端口：{WEB_PORT}", flush=True)
-    print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
-    print("其余配置（账号、思考开关等）可在部署后登录管理面板填写", flush=True)
+
+    print("API_KEY：已设置", flush=True)
+    print("监听地址：0.0.0.0", flush=True)
+    print(f"服务端口：{WEB_PORT}", flush=True)
+    print("数据保存模式：file", flush=True)
+    print("数据目录：/app/data", flush=True)
+    print(f"CPU：{CPU}", flush=True)
+    print(f"内存：{MEMORY_MB} MB", flush=True)
+
+    # 不打印真实 API_KEY，避免密钥泄露
+    # 不预置 Qwen 账号，后续通过管理后台添加
 
     # ------------------------------------------------
-    # 3.4 按官方镜像入口启动
+    # 4.4 检查官方程序文件
     # ------------------------------------------------
-    # 官方 Docker 镜像 ENTRYPOINT 为 /usr/local/bin/qwen2api
-    print("========== 环境变量检查 ==========", flush=True)
-print("API_KEY：", bool(env.get("API_KEY")), flush=True)
-print("LISTEN_ADDRESS：", env.get("LISTEN_ADDRESS"), flush=True)
-print("SERVICE_PORT：", env.get("SERVICE_PORT"), flush=True)
-print("DATA_SAVE_MODE：", env.get("DATA_SAVE_MODE"), flush=True)
-print("==================================", flush=True)
 
+    executable = "/app/qwen2api"
+
+    if not os.path.isfile(executable):
+        raise FileNotFoundError(
+            f"没有找到官方程序文件：{executable}"
+        )
+
+    # 确保程序具有执行权限
+    os.chmod(executable, 0o755)
+
+    # ------------------------------------------------
+    # 4.5 启动官方 Go 二进制
+    # ------------------------------------------------
 
     process = subprocess.Popen(
-        ["/usr/local/bin/qwen2api"],
+        [executable],
+        cwd="/app",
         env=env,
     )
 
-    print(f"进程已启动，PID：{process.pid}", flush=True)
+    print(
+        f"Qwen2API_Go 已启动，PID：{process.pid}",
+        flush=True,
+    )
 
     # ------------------------------------------------
-    # 3.5 检查是否立即退出
+    # 4.6 等待服务端口就绪
     # ------------------------------------------------
-    time.sleep(3)
-    return_code = process.poll()
-    if return_code is not None:
+
+    start_time = time.monotonic()
+    server_ready = False
+
+    while (
+        time.monotonic() - start_time
+        < STARTUP_CHECK_TIMEOUT_SECONDS
+    ):
+
+        # 检查主进程是否意外退出
+        return_code = process.poll()
+
+        if return_code is not None:
+            raise RuntimeError(
+                f"Qwen2API_Go 启动失败，"
+                f"进程退出代码：{return_code}"
+            )
+
+        # 检查 3000 端口是否可以连接
+        try:
+            with socket.create_connection(
+                ("127.0.0.1", WEB_PORT),
+                timeout=2,
+            ):
+                server_ready = True
+                break
+
+        except OSError:
+            time.sleep(
+                STARTUP_CHECK_INTERVAL_SECONDS
+            )
+
+    # ------------------------------------------------
+    # 4.7 最终启动检查
+    # ------------------------------------------------
+
+    if not server_ready:
+
+        return_code = process.poll()
+
         raise RuntimeError(
-            f"Qwen2API 启动失败，退出代码：{return_code}"
+            f"Qwen2API_Go 启动超时！"
+            f"端口 {WEB_PORT} 尚未就绪，"
+            f"进程退出代码：{return_code}"
         )
 
-    print("进程仍在运行，等待 Web 服务就绪。", flush=True)
+    print("=" * 50, flush=True)
+    print("Qwen2API_Go 启动成功！", flush=True)
+    print("3000 端口检测通过。", flush=True)
+    print("等待 Modal 接管 Web 请求。", flush=True)
+    print("=" * 50, flush=True)
