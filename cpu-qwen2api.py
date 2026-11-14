@@ -52,11 +52,14 @@ vol = modal.Volume.from_name(
 # ====================================================
 # 2. 镜像
 # ====================================================
-# 官方镜像本身没有 Python，Modal 的 Function 必须依赖 Python
-# 用 add_python 注入，这样既能跑官方二进制，又能让 Modal 正常工作
-image = modal.Image.from_registry(
-    IMAGE,
-    add_python="3.12",
+# 官方镜像是 Alpine，没有 Python
+# Modal Function 必须能检测到 Python，所以用 apk 安装
+image = (
+    modal.Image.from_registry(IMAGE)
+    .dockerfile_commands(
+        "RUN apk add --no-cache python3 py3-pip",
+        "RUN ln -sf /usr/bin/python3 /usr/bin/python",
+    )
 )
 
 app = modal.App(
