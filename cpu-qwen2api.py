@@ -12,14 +12,14 @@ IMAGE = "rfym21/qwen2api:latest"
 WEB_PORT = 3000                                       # 官方默认 SERVICE_PORT=3000
 
 MAX_CONTAINERS = 1                                    # 自用最多 1 个容器
-MAX_CONCURRENT_INPUTS = 8                            # 单容器并发输入
+MAX_CONCURRENT_INPUTS = 10                            # 单容器并发输入
 TIMEOUT_SECONDS = 3600                                # 单次函数最长运行时间（秒）
-SCALEDOWN_WINDOW_SECONDS = 90                        # 空闲后缩容等待
+SCALEDOWN_WINDOW_SECONDS = 300                        # 空闲后缩容等待
 WEB_STARTUP_TIMEOUT_SECONDS = 180                     # Web 启动等待
 
 # 资源（官方镜像很轻，自用可低配）
 CPU = 0.25                                            # 0.25 核足够
-MEMORY_MB = 256                                       # 512MB 足够，紧张再提到 768
+MEMORY_MB = 512                                       # 512MB 足够，紧张再提到 768
 
 # Modal Secret 名称（必须提前创建）
 SECRET_NAME = "qwen2api-secret"
@@ -52,9 +52,12 @@ vol = modal.Volume.from_name(
 # ====================================================
 # 2. 镜像
 # ====================================================
-# 直接拉取官方现成镜像，不在 Modal 里重新构建
-# 不会出现 Installing / Building / Creating virtual environment 之类日志
-image = modal.Image.from_registry(IMAGE)
+# 官方镜像本身没有 Python，Modal 的 Function 必须依赖 Python
+# 用 add_python 注入，这样既能跑官方二进制，又能让 Modal 正常工作
+image = modal.Image.from_registry(
+    IMAGE,
+    add_python="3.12",
+)
 
 app = modal.App(
     name=APP_NAME,
