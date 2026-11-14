@@ -136,6 +136,14 @@ def ui():
     # 3.4 按官方镜像入口启动
     # ------------------------------------------------
     # 官方 Docker 镜像 ENTRYPOINT 为 /usr/local/bin/qwen2api
+    print("========== 环境变量检查 ==========", flush=True)
+print("API_KEY：", bool(env.get("API_KEY")), flush=True)
+print("LISTEN_ADDRESS：", env.get("LISTEN_ADDRESS"), flush=True)
+print("SERVICE_PORT：", env.get("SERVICE_PORT"), flush=True)
+print("DATA_SAVE_MODE：", env.get("DATA_SAVE_MODE"), flush=True)
+print("==================================", flush=True)
+
+
     process = subprocess.Popen(
         ["/usr/local/bin/qwen2api"],
         env=env,
