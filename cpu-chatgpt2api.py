@@ -1,39 +1,59 @@
 import os
-import socket
 import subprocess
-import threading
 import time
 import modal
 
-# ====================== 配置区 ======================
-APP_NAME = "qwen2api"
-VOLUME_NAME = "qwen2api-data"
+# ====================== 配置区（所有可调参数都在这里） ======================
+APP_NAME = "qwen2api"                                 # Modal App 名称
+VOLUME_NAME = "qwen2api-data"                         # 持久化数据卷名称
 
+# 镜像配置（官方 Docker Hub 镜像，Alpine 单静态二进制，约 46MB）
 IMAGE = "rfym21/qwen2api:latest"
-WEB_PORT = 8080          # Modal 对外端口（转发端口）
-INNER_PORT = 3000        # Qwen 内部监听端口
+WEB_PORT = 3000                                       # 官方默认 SERVICE_PORT=3000
 
-MAX_CONTAINERS = 1
-MAX_CONCURRENT_INPUTS = 10
-TIMEOUT_SECONDS = 3600
-SCALEDOWN_WINDOW_SECONDS = 300
-WEB_STARTUP_TIMEOUT_SECONDS = 180
+MAX_CONTAINERS = 1                                    # 自用最多 1 个容器
+MAX_CONCURRENT_INPUTS = 10                            # 单容器并发输入
+TIMEOUT_SECONDS = 3600                                # 单次函数最长运行时间（秒）
+SCALEDOWN_WINDOW_SECONDS = 300                        # 空闲后缩容等待
+WEB_STARTUP_TIMEOUT_SECONDS = 180                     # Web 启动等待
 
-CPU = 0.25
-MEMORY_MB = 512
+# 资源（官方镜像很轻，自用可低配）
+CPU = 0.25                                            # 0.25 核足够
+MEMORY_MB = 512                                       # 512MB 足够，紧张再提到 768
 
+# Modal Secret 名称（必须提前创建）
 SECRET_NAME = "qwen2api-secret"
 
-# ---------- 环境变量说明 ----------
-# API_KEY        【唯一强制必填】管理员密钥（第一个）
-# DATA_SAVE_MODE 建议 file（账号持久化到 /app/data）
-# 其余（账号、思考开关等）部署后进管理面板配置即可
+# ---------- 环境变量说明（严格按官方行为） ----------
+# 名称                  是否必须写进环境变量/Secret          作用
+# ---------------------------------------------------------------------------
+# API_KEY               【唯一强制必填】                     访问密钥。第一个=管理员（可登录管理面板），后面的=普通（只能调 API）
+# DATA_SAVE_MODE        建议填写（推荐 file）               数据持久化方式：none=不存 / file=存到 /app/data / redis=用 Redis
+# ACCOUNTS              可不写（部署后进面板添加）           账号。格式：email:password 或 email:password|proxy_url，多个用逗号
+# OUTPUT_THINK          可不写（面板可改）                  是否输出思考过程 true/false
+# SEARCH_INFO_MODE      可不写（面板可改）                  搜索结果展示 table / text
+# CACHE_MODE            可不写（面板可改）                  图片缓存 default=内存 / file=落盘
+# SERVICE_PORT          代码里已写死 3000，一般不用再写      服务端口
+# LISTEN_ADDRESS        代码里已写死 0.0.0.0，一般不用再写   监听地址（容器内必须是 0.0.0.0）
 # ====================================================
 
 
-vol = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+# ====================================================
+# 1. 持久化数据卷
+# ====================================================
+# 官方 Docker Compose 把数据挂到 /app/data
+# DATA_SAVE_MODE=file 时，账号和配置会写到这里
+# 不要随便删这个 Volume，否则可能丢账号
+vol = modal.Volume.from_name(
+    VOLUME_NAME,
+    create_if_missing=True,
+)
 
-# Alpine 镜像没有 Python，Modal Function 需要 Python，用 apk 装
+# ====================================================
+# 2. 镜像
+# ====================================================
+# 官方镜像是 Alpine，没有 Python
+# Modal Function 必须能检测到 Python，所以用 apk 安装
 image = (
     modal.Image.from_registry(IMAGE)
     .dockerfile_commands(
@@ -42,111 +62,95 @@ image = (
     )
 )
 
-app = modal.App(name=APP_NAME, image=image)
+app = modal.App(
+    name=APP_NAME,
+    image=image,
+)
 
-
-def _tcp_proxy(listen_port: int, target_host: str, target_port: int):
-    """把 0.0.0.0:listen_port 转发到 target_host:target_port（解决只绑 localhost 的问题）"""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", listen_port))
-    server.listen(128)
-    print(f"TCP 代理已启动：0.0.0.0:{listen_port} -> {target_host}:{target_port}", flush=True)
-
-    def _handle(client: socket.socket):
-        try:
-            upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            upstream.connect((target_host, target_port))
-            sockets = [client, upstream]
-            while True:
-                r, _, _ = select_select(sockets, [], [], 60)
-                if not r:
-                    break
-                for s in r:
-                    other = upstream if s is client else client
-                    data = s.recv(65536)
-                    if not data:
-                        return
-                    other.sendall(data)
-        except Exception:
-            pass
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
-            try:
-                upstream.close()
-            except Exception:
-                pass
-
-    def select_select(r, w, x, timeout):
-        import select
-        return select.select(r, w, x, timeout)
-
-    while True:
-        try:
-            client, _ = server.accept()
-            t = threading.Thread(target=_handle, args=(client,), daemon=True)
-            t.start()
-        except Exception as e:
-            print(f"代理 accept 异常: {e}", flush=True)
-            time.sleep(0.1)
-
-
+# ====================================================
+# 3. 启动 qwen2api
+# ====================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
     cpu=CPU,
     memory=MEMORY_MB,
-    volumes={"/app/data": vol},
+    volumes={"/app/data": vol},                       # 官方数据目录
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
-    secrets=[modal.Secret.from_name(SECRET_NAME)],
+    secrets=[
+        modal.Secret.from_name(SECRET_NAME),
+    ],
 )
-@modal.concurrent(max_inputs=MAX_CONCURRENT_INPUTS)
-@modal.web_server(WEB_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS)
+@modal.concurrent(
+    max_inputs=MAX_CONCURRENT_INPUTS,
+)
+@modal.web_server(
+    WEB_PORT,
+    startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
+)
 def ui():
-    """启动 Qwen2API + 本地端口转发。"""
+    """启动 Qwen2API（官方二进制入口）。"""
     print("======================================", flush=True)
     print("正在启动 Qwen2API...", flush=True)
     print("======================================", flush=True)
 
+    # ------------------------------------------------
+    # 3.1 只强制校验官方真正必填的项
+    # ------------------------------------------------
     api_key = os.environ.get("API_KEY", "").strip()
+
     if not api_key:
         raise ValueError(
-            "API_KEY 未设置。这是官方唯一强制必填项，请在 Modal Secret 中配置。"
+            "API_KEY 未设置。"
+            "这是官方唯一强制必填项，请在 Modal Secret 中配置。"
+            "第一个密钥为管理员，可登录管理面板。"
         )
 
+    # ------------------------------------------------
+    # 3.2 组装环境变量（尽量少写）
+    # ------------------------------------------------
     env = os.environ.copy()
+
+    # 必填
     env["API_KEY"] = api_key
-    env["SERVICE_PORT"] = str(INNER_PORT)
-    # 官方默认就是 localhost，这里不强求改它
-    env["DATA_SAVE_MODE"] = os.environ.get("DATA_SAVE_MODE", "file").strip() or "file"
 
-    print(f"API_KEY：已设置", flush=True)
+    # 服务配置（容器内固定写法）
+    env["SERVICE_PORT"] = str(WEB_PORT)
+    env["LISTEN_ADDRESS"] = "0.0.0.0"
+
+    # 推荐用 file，账号等会落到挂载的 /app/data
+    # 不写的话官方默认是 none（重启就丢）
+    env["DATA_SAVE_MODE"] = os.environ.get("DATA_SAVE_MODE", "file")
+
+    # ------------------------------------------------
+    # 3.3 启动信息
+    # ------------------------------------------------
+    print(f"API_KEY：已设置（第一个为管理员密钥）", flush=True)
     print(f"DATA_SAVE_MODE：{env['DATA_SAVE_MODE']}", flush=True)
-    print(f"内部端口：{INNER_PORT}（localhost）", flush=True)
-    print(f"对外端口：{WEB_PORT}（0.0.0.0，经代理转发）", flush=True)
+    print(f"数据目录：/app/data", flush=True)
+    print(f"监听端口：{WEB_PORT}", flush=True)
     print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
+    print("其余配置（账号、思考开关等）可在部署后登录管理面板填写", flush=True)
 
-    # 1) 先起官方二进制（听 localhost:3000）
+    # ------------------------------------------------
+    # 3.4 按官方镜像入口启动
+    # ------------------------------------------------
+    # 官方 Docker 镜像 ENTRYPOINT 为 /usr/local/bin/qwen2api
     process = subprocess.Popen(
         ["/usr/local/bin/qwen2api"],
         env=env,
-        cwd="/app",
     )
-    print(f"Qwen 进程已启动，PID：{process.pid}", flush=True)
 
+    print(f"进程已启动，PID：{process.pid}", flush=True)
+
+    # ------------------------------------------------
+    # 3.5 检查是否立即退出
+    # ------------------------------------------------
     time.sleep(3)
-    if process.poll() is not None:
-        raise RuntimeError(f"Qwen2API 启动失败，退出代码：{process.poll()}")
-
-    # 2) 再起转发：0.0.0.0:8080 -> 127.0.0.1:3000
-    proxy_thread = threading.Thread(
-        target=_tcp_proxy,
-        args=(WEB_PORT, "127.0.0.1", INNER_PORT),
-        daemon=True,
-    )
-    proxy_thread.start()
+    return_code = process.poll()
+    if return_code is not None:
+        raise RuntimeError(
+            f"Qwen2API 启动失败，退出代码：{return_code}"
+        )
 
     print("进程仍在运行，等待 Web 服务就绪。", flush=True)
