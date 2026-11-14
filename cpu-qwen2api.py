@@ -12,7 +12,7 @@ IMAGE = "rfym21/qwen2api:latest"
 WEB_PORT = 3000                                       # 官方默认 SERVICE_PORT=3000
 
 MAX_CONTAINERS = 1                                    # 自用最多 1 个容器
-MAX_CONCURRENT_INPUTS = 10                            # 单容器并发输入
+MAX_CONCURRENT_INPUTS = 8                            # 单容器并发输入
 TIMEOUT_SECONDS = 3600                                # 单次函数最长运行时间（秒）
 SCALEDOWN_WINDOW_SECONDS = 300                        # 空闲后缩容等待
 WEB_STARTUP_TIMEOUT_SECONDS = 180                     # Web 启动等待
@@ -34,7 +34,7 @@ SECRET_NAME = "qwen2api-secret"
 # SEARCH_INFO_MODE      可不写（面板可改）                  搜索结果展示 table / text
 # CACHE_MODE            可不写（面板可改）                  图片缓存 default=内存 / file=落盘
 # SERVICE_PORT          代码里已写死 3000，一般不用再写      服务端口
-# LISTEN_ADDRESS        代码里已写死 0.0.0.0，一般不用再写   监听地址（容器内必须是 0.0.0.0）
+# LISTEN_ADDRESS        代码里强制写 0.0.0.0，必须           监听地址（容器内必须是 0.0.0.0，否则 Modal 访问不到）
 # ====================================================
 
 
@@ -52,8 +52,9 @@ vol = modal.Volume.from_name(
 # ====================================================
 # 2. 镜像
 # ====================================================
-# 官方镜像是 Alpine，没有 Python
+# 官方镜像是 Alpine（musl），本身没有 Python
 # Modal Function 必须能检测到 Python，所以用 apk 安装
+# （Vaultwarden 那套 add_python 对 Alpine 经常失效）
 image = (
     modal.Image.from_registry(IMAGE)
     .dockerfile_commands(
@@ -107,38 +108,49 @@ def ui():
         )
 
     # ------------------------------------------------
-    # 3.2 组装环境变量（尽量少写）
+    # 3.2 组装环境变量 + 写入 .env
     # ------------------------------------------------
+    # 官方二进制会读当前目录的 .env，文件优先级往往高于进程环境变量
+    # 所以这里强制写一份，避免被默认的 localhost 覆盖
     env = os.environ.copy()
 
-    # 必填
+    listen_address = "0.0.0.0"                        # 容器内必须 0.0.0.0
+    service_port = str(WEB_PORT)
+    # 先用 none 排查监听问题；确认界面能开后再改回 file
+    data_save_mode = os.environ.get("DATA_SAVE_MODE", "none").strip() or "none"
+
     env["API_KEY"] = api_key
+    env["LISTEN_ADDRESS"] = listen_address
+    env["SERVICE_PORT"] = service_port
+    env["DATA_SAVE_MODE"] = data_save_mode
 
-    # 服务配置（容器内固定写法）
-    env["SERVICE_PORT"] = str(WEB_PORT)
-    env["LISTEN_ADDRESS"] = "0.0.0.0"
-
-    # 推荐用 file，账号等会落到挂载的 /app/data
-    # 不写的话官方默认是 none（重启就丢）
-    env["DATA_SAVE_MODE"] = os.environ.get("DATA_SAVE_MODE", "file")    
+    env_file = "/app/.env"
+    with open(env_file, "w", encoding="utf-8") as f:
+        f.write(f"API_KEY={api_key}\n")
+        f.write(f"LISTEN_ADDRESS={listen_address}\n")
+        f.write(f"SERVICE_PORT={service_port}\n")
+        f.write(f"DATA_SAVE_MODE={data_save_mode}\n")
 
     # ------------------------------------------------
     # 3.3 启动信息
     # ------------------------------------------------
+    print(f"已写入 {env_file}", flush=True)
     print(f"API_KEY：已设置（第一个为管理员密钥）", flush=True)
-    print(f"DATA_SAVE_MODE：{env['DATA_SAVE_MODE']}", flush=True)
+    print(f"LISTEN_ADDRESS：{listen_address}", flush=True)
+    print(f"SERVICE_PORT：{service_port}", flush=True)
+    print(f"DATA_SAVE_MODE：{data_save_mode}", flush=True)
     print(f"数据目录：/app/data", flush=True)
-    print(f"监听端口：{WEB_PORT}", flush=True)
     print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
     print("其余配置（账号、思考开关等）可在部署后登录管理面板填写", flush=True)
 
     # ------------------------------------------------
     # 3.4 按官方镜像入口启动
     # ------------------------------------------------
-    # 官方 Docker 镜像 ENTRYPOINT 为 /usr/local/bin/qwen2api
+    # cwd=/app，确保进程读到上面写的 /app/.env
     process = subprocess.Popen(
         ["/usr/local/bin/qwen2api"],
         env=env,
+        cwd="/app",
     )
 
     print(f"进程已启动，PID：{process.pid}", flush=True)
