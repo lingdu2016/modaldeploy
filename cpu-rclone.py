@@ -11,8 +11,8 @@ import modal
 APP_NAME = "rclone"
 VOLUME_NAME = "rclone-data"
 
-# ---------- 官方镜像 ----------
-IMAGE = "rclone/rclone:latest"
+# ---------- 官方镜像（锁定 1.75.0，继续支持 --rc-web-gui） ----------
+IMAGE = "rclone/rclone:1.75.0"
 
 # ---------- Web 服务配置 ----------
 WEB_PORT = 5572
@@ -186,7 +186,7 @@ def ui():
     atexit.register(commit_on_exit)
 
     # ------------------------------------------------
-    # 4.7 Rclone 启动命令
+    # 4.7 Rclone 启动命令（1.75.0 继续使用旧 Web GUI）
     # ------------------------------------------------
     command = [
         "rclone",
@@ -223,7 +223,7 @@ def ui():
     print(f"Rclone 进程已启动，PID：{process.pid}", flush=True)
 
     # ------------------------------------------------
-    # 4.9 等待服务端口就绪（参考 Slash 写法）
+    # 4.9 等待服务端口就绪
     # ------------------------------------------------
     start_time = time.monotonic()
 
