@@ -1,9 +1,9 @@
-
 import os
 import subprocess
 import time
 import threading
 import atexit
+import socket
 import modal
 
 # ====================== 配置区（所有可调参数都在这里） ======================
@@ -13,7 +13,6 @@ VOLUME_NAME = "rclone-data"
 
 # ---------- 官方镜像 ----------
 IMAGE = "rclone/rclone:latest"
-PYTHON_VERSION = "3.12"
 
 # ---------- Web 服务配置 ----------
 WEB_PORT = 5572
@@ -50,23 +49,30 @@ vol = modal.Volume.from_name(
 
 
 # ====================================================
-# 2. 官方镜像
+# 2. 官方镜像 + 安装 Python（参考 Slash 写法）
 # ====================================================
-# 保留 Rclone 官方镜像
-# 添加 Modal Function 所需的 Python 3.12
-#
-# 关键修正：
-# 官方镜像原本 ENTRYPOINT = ["rclone"]
-# 使用 entrypoint([]) 清除原入口
-# 避免 Modal 检测 Python 时被 rclone 命令拦截
-
-image = (
-    modal.Image.from_registry(
-        IMAGE,
-        add_python=PYTHON_VERSION,
-    )
-    .entrypoint([])
+# 官方 rclone 镜像基于 Alpine
+# 用 setup_dockerfile_commands 安装 python3，避免 add_python 在 musl 上检测失败
+image = modal.Image.from_registry(
+    IMAGE,
+    setup_dockerfile_commands=[
+        "RUN apk add --no-cache python3 py3-pip",
+        "RUN ln -sf /usr/bin/python3 /usr/bin/python",
+        "RUN ln -sf /usr/bin/pip3 /usr/bin/pip",
+    ],
 )
+
+# 关键修复：
+# 官方镜像原本 ENTRYPOINT = ["rclone"]
+# Modal 启动 Python Function 时会传入自己的启动参数
+# 通过 shell 转交参数，避免 rclone 错误接收 Modal 的参数
+image = image.entrypoint([
+    "/bin/sh",
+    "-c",
+    'exec "$@"',
+    "--",
+])
+
 
 app = modal.App(
     name=APP_NAME,
@@ -79,39 +85,22 @@ app = modal.App(
 # ====================================================
 def commit_worker():
     """定期提交配置数据。"""
-
     while True:
         time.sleep(30)
-
         try:
             vol.commit()
-            print(
-                "Volume 自动提交成功。",
-                flush=True,
-            )
-
+            print("Volume 自动提交成功。", flush=True)
         except Exception as e:
-            print(
-                f"Volume 自动提交失败：{e}",
-                flush=True,
-            )
+            print(f"Volume 自动提交失败：{e}", flush=True)
 
 
 def commit_on_exit():
     """退出时尝试最后一次提交。"""
-
     try:
         vol.commit()
-        print(
-            "Volume 最终提交成功。",
-            flush=True,
-        )
-
+        print("Volume 最终提交成功。", flush=True)
     except Exception as e:
-        print(
-            f"Volume 最终提交失败：{e}",
-            flush=True,
-        )
+        print(f"Volume 最终提交失败：{e}", flush=True)
 
 
 # ====================================================
@@ -147,11 +136,7 @@ def ui():
     # 4.1 检查 Python
     # ------------------------------------------------
     import sys
-
-    print(
-        f"Python 版本：{sys.version}",
-        flush=True,
-    )
+    print(f"Python 版本：{sys.version}", flush=True)
 
     # ------------------------------------------------
     # 4.2 检查 Rclone
@@ -162,34 +147,20 @@ def ui():
         text=True,
         check=True,
     )
-
     print(result.stdout, flush=True)
 
     # ------------------------------------------------
     # 4.3 检查 Secret
     # ------------------------------------------------
-    web_user = os.environ.get(
-        "RCLONE_WEB_USER", ""
-    ).strip()
-
-    web_pass = os.environ.get(
-        "RCLONE_WEB_PASS", ""
-    ).strip()
+    web_user = os.environ.get("RCLONE_WEB_USER", "").strip()
+    web_pass = os.environ.get("RCLONE_WEB_PASS", "").strip()
 
     if not web_user:
-        raise ValueError(
-            "RCLONE_WEB_USER 未设置，请检查 Modal Secret。"
-        )
-
+        raise ValueError("RCLONE_WEB_USER 未设置，请检查 Modal Secret。")
     if not web_pass:
-        raise ValueError(
-            "RCLONE_WEB_PASS 未设置，请检查 Modal Secret。"
-        )
-
+        raise ValueError("RCLONE_WEB_PASS 未设置，请检查 Modal Secret。")
     if len(web_pass) < 12:
-        raise ValueError(
-            "RCLONE_WEB_PASS 不能少于 12 个字符。"
-        )
+        raise ValueError("RCLONE_WEB_PASS 不能少于 12 个字符。")
 
     # ------------------------------------------------
     # 4.4 创建目录
@@ -201,7 +172,6 @@ def ui():
     # 4.5 环境变量
     # ------------------------------------------------
     env = os.environ.copy()
-
     env["TZ"] = "Asia/Shanghai"
     env["RCLONE_CONFIG"] = CONFIG_FILE
     env["XDG_CONFIG_HOME"] = CONFIG_DIR
@@ -213,7 +183,6 @@ def ui():
         target=commit_worker,
         daemon=True,
     ).start()
-
     atexit.register(commit_on_exit)
 
     # ------------------------------------------------
@@ -222,27 +191,14 @@ def ui():
     command = [
         "rclone",
         "rcd",
-
-        "--rc-addr",
-        f"0.0.0.0:{WEB_PORT}",
-
-        "--rc-user",
-        web_user,
-
-        "--rc-pass",
-        web_pass,
-
+        "--rc-addr", f"0.0.0.0:{WEB_PORT}",
+        "--rc-user", web_user,
+        "--rc-pass", web_pass,
         "--rc-web-gui",
         "--rc-web-gui-no-open-browser",
-
-        "--config",
-        CONFIG_FILE,
-
-        "--cache-dir",
-        CACHE_DIR,
-
-        "--log-level",
-        "INFO",
+        "--config", CONFIG_FILE,
+        "--cache-dir", CACHE_DIR,
+        "--log-level", "INFO",
     ]
 
     # ------------------------------------------------
@@ -250,7 +206,6 @@ def ui():
     # ------------------------------------------------
     print("======================================", flush=True)
     print(f"官方镜像：{IMAGE}", flush=True)
-    print(f"Python：{PYTHON_VERSION}", flush=True)
     print(f"Web 端口：{WEB_PORT}", flush=True)
     print("身份验证：已启用", flush=True)
     print(f"配置目录：{CONFIG_DIR}", flush=True)
@@ -265,24 +220,29 @@ def ui():
         env=env,
     )
 
-    print(
-        f"Rclone 进程已启动，PID：{process.pid}",
-        flush=True,
-    )
+    print(f"Rclone 进程已启动，PID：{process.pid}", flush=True)
 
     # ------------------------------------------------
-    # 4.9 检查是否立即退出
+    # 4.9 等待服务端口就绪（参考 Slash 写法）
     # ------------------------------------------------
-    time.sleep(3)
+    start_time = time.monotonic()
 
-    return_code = process.poll()
+    while time.monotonic() - start_time < WEB_STARTUP_TIMEOUT_SECONDS:
+        # 检查进程是否意外退出
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise RuntimeError(f"Rclone 启动失败，退出代码：{exit_code}")
 
-    if return_code is not None:
-        raise RuntimeError(
-            f"Rclone 启动失败，退出代码：{return_code}"
-        )
+        # 检查端口是否开始监听
+        try:
+            with socket.create_connection(("127.0.0.1", WEB_PORT), timeout=1):
+                print(f"Rclone 已成功启动，监听端口：{WEB_PORT}", flush=True)
+                break
+        except OSError:
+            time.sleep(0.5)
+    else:
+        raise RuntimeError("Rclone 启动超时，请检查 Modal 容器日志")
 
     print("======================================", flush=True)
-    print("Rclone 进程运行正常。", flush=True)
-    print("等待 Web GUI 服务就绪。", flush=True)
+    print("Rclone Web GUI 服务已就绪。", flush=True)
     print("======================================", flush=True)
