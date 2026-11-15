@@ -2,6 +2,8 @@
 import os
 import subprocess
 import time
+import threading
+import atexit
 import modal
 
 # ====================== 配置区（所有可调参数都在这里） ======================
@@ -10,9 +12,10 @@ APP_NAME = "rclone"
 VOLUME_NAME = "rclone-data"
 
 # ---------- 官方镜像 ----------
-# 使用 Rclone 官方 Docker 镜像
-# 不使用自定义 Dockerfile，不进行镜像预热
 IMAGE = "rclone/rclone:latest"
+
+# 给官方 Alpine 镜像添加 Modal 所需的 Python
+PYTHON_VERSION = "3.12"
 
 # ---------- Web 服务配置 ----------
 WEB_PORT = 5572
@@ -36,19 +39,12 @@ CONFIG_DIR = "/config"
 CACHE_DIR = "/cache"
 CONFIG_FILE = "/config/rclone.conf"
 
-# ---------- 身份验证环境变量 ----------
-# RCLONE_WEB_USER：Web GUI 登录用户名
-# RCLONE_WEB_PASS：Web GUI 登录密码
-# 两项均需要在 Modal Secret 中设置
-
 # ====================================================
 
 
 # ====================================================
 # 1. 持久化数据卷
 # ====================================================
-# 保存 Rclone 的配置文件和远程存储认证信息
-# 不要删除这个 Volume
 vol = modal.Volume.from_name(
     VOLUME_NAME,
     create_if_missing=True,
@@ -58,10 +54,14 @@ vol = modal.Volume.from_name(
 # ====================================================
 # 2. 官方镜像
 # ====================================================
-# 直接使用官方镜像
-# 官方镜像自带 rclone 二进制文件
-# 无需安装 Python 依赖或编译程序
-image = modal.Image.from_registry(IMAGE)
+# 保留 Rclone 官方镜像
+# 仅增加 Modal Function 所需的 Python 3.12
+# 不更换基础镜像，不自行编译 Rclone
+
+image = modal.Image.from_registry(
+    IMAGE,
+    add_python=PYTHON_VERSION,
+)
 
 app = modal.App(
     name=APP_NAME,
@@ -70,7 +70,41 @@ app = modal.App(
 
 
 # ====================================================
-# 3. 启动 Rclone Web GUI
+# 3. Volume 自动提交
+# ====================================================
+def commit_worker():
+    """定期提交 Rclone 配置变化。"""
+
+    while True:
+        time.sleep(30)
+
+        try:
+            vol.commit()
+            print("Volume 自动提交成功。", flush=True)
+
+        except Exception as e:
+            print(
+                f"Volume 自动提交失败：{e}",
+                flush=True,
+            )
+
+
+def commit_on_exit():
+    """退出时尝试最后一次提交。"""
+
+    try:
+        vol.commit()
+        print("Volume 最终提交成功。", flush=True)
+
+    except Exception as e:
+        print(
+            f"Volume 最终提交失败：{e}",
+            flush=True,
+        )
+
+
+# ====================================================
+# 4. 启动 Rclone
 # ====================================================
 @app.function(
     max_containers=MAX_CONTAINERS,
@@ -93,17 +127,43 @@ app = modal.App(
     startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
 )
 def ui():
-    """启动 Rclone 官方 Web GUI。"""
 
     print("======================================", flush=True)
     print("正在启动 Rclone...", flush=True)
     print("======================================", flush=True)
 
     # ------------------------------------------------
-    # 3.1 检查身份验证配置
+    # 4.1 检查 Python 环境
     # ------------------------------------------------
-    web_user = os.environ.get("RCLONE_WEB_USER", "").strip()
-    web_pass = os.environ.get("RCLONE_WEB_PASS", "").strip()
+    import sys
+
+    print(
+        f"Python 版本：{sys.version}",
+        flush=True,
+    )
+
+    # ------------------------------------------------
+    # 4.2 检查 Rclone
+    # ------------------------------------------------
+    result = subprocess.run(
+        ["rclone", "version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    print(result.stdout, flush=True)
+
+    # ------------------------------------------------
+    # 4.3 检查 Secret
+    # ------------------------------------------------
+    web_user = os.environ.get(
+        "RCLONE_WEB_USER", ""
+    ).strip()
+
+    web_pass = os.environ.get(
+        "RCLONE_WEB_PASS", ""
+    ).strip()
 
     if not web_user:
         raise ValueError(
@@ -117,51 +177,37 @@ def ui():
 
     if len(web_pass) < 12:
         raise ValueError(
-            "RCLONE_WEB_PASS 长度不能少于 12 个字符。"
+            "RCLONE_WEB_PASS 不能少于 12 个字符。"
         )
 
     # ------------------------------------------------
-    # 3.2 准备目录
+    # 4.4 创建目录
     # ------------------------------------------------
     os.makedirs(CONFIG_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    print(f"配置目录：{CONFIG_DIR}", flush=True)
-    print(f"配置文件：{CONFIG_FILE}", flush=True)
-    print(f"缓存目录：{CACHE_DIR}", flush=True)
-
     # ------------------------------------------------
-    # 3.3 组装环境变量
+    # 4.5 设置环境变量
     # ------------------------------------------------
     env = os.environ.copy()
 
     env["TZ"] = "Asia/Shanghai"
+    env["RCLONE_CONFIG"] = CONFIG_FILE
     env["XDG_CONFIG_HOME"] = CONFIG_DIR
 
-    # 明确指定配置文件位置
-    env["RCLONE_CONFIG"] = CONFIG_FILE
+    # ------------------------------------------------
+    # 4.6 启动 Volume 提交线程
+    # ------------------------------------------------
+    threading.Thread(
+        target=commit_worker,
+        daemon=True,
+    ).start()
+
+    atexit.register(commit_on_exit)
 
     # ------------------------------------------------
-    # 3.4 启动参数
+    # 4.7 Rclone 启动命令
     # ------------------------------------------------
-    # rclone rcd：
-    # 启动 Remote Control API
-    #
-    # --rc-web-gui：
-    # 在同一个端口提供官方 Web GUI
-    #
-    # --rc-user / --rc-pass：
-    # 启用身份验证
-    #
-    # --rc-web-gui-no-open-browser：
-    # 云服务器不需要自动打开浏览器
-    #
-    # --config：
-    # 确保远程配置写入持久化 Volume
-    #
-    # --cache-dir：
-    # 缓存放在临时目录，不占用持久化 Volume
-
     command = [
         "rclone",
         "rcd",
@@ -189,13 +235,17 @@ def ui():
     ]
 
     # ------------------------------------------------
-    # 3.5 启动服务
+    # 4.8 启动服务
     # ------------------------------------------------
     print("======================================", flush=True)
     print("Rclone 启动配置：", flush=True)
+    print(f"官方镜像：{IMAGE}", flush=True)
+    print(f"Python：{PYTHON_VERSION}", flush=True)
     print(f"Web 端口：{WEB_PORT}", flush=True)
     print("身份验证：已启用", flush=True)
-    print("持久化配置：已启用", flush=True)
+    print(f"配置目录：{CONFIG_DIR}", flush=True)
+    print(f"配置文件：{CONFIG_FILE}", flush=True)
+    print(f"缓存目录：{CACHE_DIR}", flush=True)
     print(f"CPU：{CPU}", flush=True)
     print(f"内存：{MEMORY_MB} MB", flush=True)
     print("======================================", flush=True)
@@ -211,7 +261,7 @@ def ui():
     )
 
     # ------------------------------------------------
-    # 3.6 检查进程是否立即退出
+    # 4.9 检查是否立即退出
     # ------------------------------------------------
     time.sleep(3)
 
