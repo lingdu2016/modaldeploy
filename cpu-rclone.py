@@ -13,8 +13,6 @@ VOLUME_NAME = "rclone-data"
 
 # ---------- 官方镜像 ----------
 IMAGE = "rclone/rclone:latest"
-
-# 给官方 Alpine 镜像添加 Modal 所需的 Python
 PYTHON_VERSION = "3.12"
 
 # ---------- Web 服务配置 ----------
@@ -55,12 +53,19 @@ vol = modal.Volume.from_name(
 # 2. 官方镜像
 # ====================================================
 # 保留 Rclone 官方镜像
-# 仅增加 Modal Function 所需的 Python 3.12
-# 不更换基础镜像，不自行编译 Rclone
+# 添加 Modal Function 所需的 Python 3.12
+#
+# 关键修正：
+# 官方镜像原本 ENTRYPOINT = ["rclone"]
+# 使用 entrypoint([]) 清除原入口
+# 避免 Modal 检测 Python 时被 rclone 命令拦截
 
-image = modal.Image.from_registry(
-    IMAGE,
-    add_python=PYTHON_VERSION,
+image = (
+    modal.Image.from_registry(
+        IMAGE,
+        add_python=PYTHON_VERSION,
+    )
+    .entrypoint([])
 )
 
 app = modal.App(
@@ -73,14 +78,17 @@ app = modal.App(
 # 3. Volume 自动提交
 # ====================================================
 def commit_worker():
-    """定期提交 Rclone 配置变化。"""
+    """定期提交配置数据。"""
 
     while True:
         time.sleep(30)
 
         try:
             vol.commit()
-            print("Volume 自动提交成功。", flush=True)
+            print(
+                "Volume 自动提交成功。",
+                flush=True,
+            )
 
         except Exception as e:
             print(
@@ -94,7 +102,10 @@ def commit_on_exit():
 
     try:
         vol.commit()
-        print("Volume 最终提交成功。", flush=True)
+        print(
+            "Volume 最终提交成功。",
+            flush=True,
+        )
 
     except Exception as e:
         print(
@@ -133,7 +144,7 @@ def ui():
     print("======================================", flush=True)
 
     # ------------------------------------------------
-    # 4.1 检查 Python 环境
+    # 4.1 检查 Python
     # ------------------------------------------------
     import sys
 
@@ -187,7 +198,7 @@ def ui():
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     # ------------------------------------------------
-    # 4.5 设置环境变量
+    # 4.5 环境变量
     # ------------------------------------------------
     env = os.environ.copy()
 
@@ -238,7 +249,6 @@ def ui():
     # 4.8 启动服务
     # ------------------------------------------------
     print("======================================", flush=True)
-    print("Rclone 启动配置：", flush=True)
     print(f"官方镜像：{IMAGE}", flush=True)
     print(f"Python：{PYTHON_VERSION}", flush=True)
     print(f"Web 端口：{WEB_PORT}", flush=True)
