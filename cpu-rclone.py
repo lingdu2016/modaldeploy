@@ -18,15 +18,15 @@ IMAGE = "rclone/rclone:1.75.0"
 WEB_PORT = 5572
 
 MAX_CONTAINERS = 1
-MAX_CONCURRENT_INPUTS = 10
+MAX_CONCURRENT_INPUTS = 8
 
 TIMEOUT_SECONDS = 3600
 SCALEDOWN_WINDOW_SECONDS = 300
 WEB_STARTUP_TIMEOUT_SECONDS = 180
 
 # ---------- 资源配置 ----------
-CPU = 0.5
-MEMORY_MB = 1024
+CPU = 0.25
+MEMORY_MB = 256
 
 # ---------- Modal Secret ----------
 SECRET_NAME = "rclone-secret"
