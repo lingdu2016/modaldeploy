@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -8,14 +7,31 @@ import subprocess
 import atexit
 import urllib.request
 import urllib.error
+import stat
 
 import modal
-################################下面参数需要提前写入modal环境变量中
-# echo "GROK2API_JWT_SECRET=$(openssl rand -hex 32)"
-# echo "GROK2API_CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -base64 32)"
-# echo "GROK2API_ADMIN_USERNAME=admin"
-# echo "GROK2API_ADMIN_PASSWORD=$(openssl rand -base64 24)"  至少12位，下面代码有判断
-###############################################
+
+
+# ============================================================
+# Modal 环境变量（在创建 Secret 时设置）
+# ============================================================
+# GROK2API_JWT_SECRET
+#   openssl rand -hex 32
+#
+# GROK2API_CREDENTIAL_ENCRYPTION_KEY
+#   openssl rand -base64 32
+#
+# GROK2API_ADMIN_USERNAME
+#   admin
+#
+# GROK2API_ADMIN_PASSWORD
+#   设置一个强密码。官方示例没有规定必须至少 12 个字符，
+#   本部署代码不再额外设置 12 位长度限制。
+#
+# Secret 名称：grok2api-secret
+# ============================================================
+
+
 # ============================================================
 #                    配置区（集中管理）
 # ============================================================
@@ -24,15 +40,15 @@ import modal
 APP_NAME = "grok2api"
 
 # ---------- Modal Volume ----------
+# 只使用一个 Volume，保存 SQLite 数据库和媒体文件。
 VOLUME_NAME = "grok2api-data"
-QUALITY_VOLUME_NAME = "grok2api-quality-state"
 
 # ---------- 官方 Docker 镜像 ----------
 IMAGE = "ghcr.io/chenyme/grok2api:latest"
 
 # ---------- Web 服务 ----------
 WEB_PORT = 8000
-WEB_STARTUP_TIMEOUT_SECONDS = 180
+WEB_STARTUP_TIMEOUT_SECONDS = 300
 
 # ---------- Modal 资源 ----------
 MAX_CONTAINERS = 1
@@ -50,21 +66,26 @@ SECRET_NAME = "grok2api-secret"
 # ---------- 容器目录 ----------
 APP_DIR = "/app"
 
-# SQLite 数据库、媒体文件
+# SQLite 数据库和媒体文件目录
 DATA_DIR = "/app/data"
+MEDIA_DIR = "/app/data/media"
+DATABASE_FILE = "/app/data/backend.db"
 
-# 官方 Docker 配置文件来源
+# 官方配置文件来源
 CONFIG_SOURCE_DIR = "/run/grok2api"
 CONFIG_SOURCE_FILE = f"{CONFIG_SOURCE_DIR}/config.yaml"
 
-# 官方入口脚本
+# 官方 ENTRYPOINT 和 Go 二进制
 ENTRYPOINT_PATH = "/usr/local/bin/grok2api-entrypoint"
-
-# 官方 Go 二进制
 BINARY_PATH = "/app/grok2api"
 
-# 官方质量守护状态目录
+# 官方 Quality Guard 状态目录
+# 当前 config.yaml 中关闭 Quality Guard，因此不单独挂载 Volume。
 QUALITY_GUARD_DIR = "/var/lib/grok2api-quality-guard"
+
+# 官方 Dockerfile 创建的运行用户
+APP_UID = 10001
+APP_GID = 10001
 
 # ---------- 初始化管理员 ----------
 DEFAULT_ADMIN_USERNAME = "admin"
@@ -77,17 +98,11 @@ TIMEZONE = "Asia/Shanghai"
 #                    创建 Modal Volume
 # ============================================================
 
-# 主数据 Volume：
-# 保存 SQLite 数据库、账号凭据、媒体文件等。
+# 一个 Volume 同时保存：
+# /app/data/backend.db
+# /app/data/media/
 vol = modal.Volume.from_name(
     VOLUME_NAME,
-    create_if_missing=True,
-)
-
-# 质量守护状态 Volume：
-# 当前默认不启用质量守护，但保留官方 Compose 的持久化目录。
-quality_vol = modal.Volume.from_name(
-    QUALITY_VOLUME_NAME,
     create_if_missing=True,
 )
 
@@ -97,12 +112,8 @@ quality_vol = modal.Volume.from_name(
 # ============================================================
 
 # 官方镜像基于 Alpine。
-# Modal 的 Python 函数需要 Python 运行环境，
-# 因此仅额外安装 Python，不修改 Grok2API 二进制。
-#
-# 官方 ENTRYPOINT 由后面的 Shell 包装器接管，
-# 在 ui() 中再显式调用官方 entrypoint。
-
+# Modal Python Function 需要 Python 运行环境，因此安装 Python。
+# 不修改官方 Go 二进制和官方 ENTRYPOINT。
 image = modal.Image.from_registry(
     IMAGE,
     setup_dockerfile_commands=[
@@ -112,8 +123,8 @@ image = modal.Image.from_registry(
     ],
 )
 
-# 避免原始 Docker ENTRYPOINT 与 Modal 函数启动过程冲突。
-# 保留通过 subprocess 显式调用官方入口脚本的能力。
+# 使用 Shell 包装器接收 Modal 的启动参数。
+# ui() 内部仍会显式调用官方 ENTRYPOINT。
 image = image.entrypoint([
     "/bin/sh",
     "-c",
@@ -137,8 +148,8 @@ app = modal.App(
 # ============================================================
 
 def create_config():
+    """从 Modal Secret 读取密钥并生成官方配置文件。"""
 
-    # 从 Modal Secret 读取密钥
     jwt_secret = os.environ.get(
         "GROK2API_JWT_SECRET", ""
     ).strip()
@@ -168,7 +179,7 @@ def create_config():
             "GROK2API_CREDENTIAL_ENCRYPTION_KEY 未设置。"
         )
 
-    # 确认加密密钥是有效的 Base64 32 字节密钥
+    # 官方要求凭据加密密钥为 Base64 编码的 32 字节密钥。
     try:
         decoded_key = base64.b64decode(
             encryption_key,
@@ -189,9 +200,11 @@ def create_config():
             "管理员用户名不能为空。"
         )
 
-    if len(admin_password) < 12:
+    # 不额外规定管理员密码必须达到 12 位。
+    # 只检查是否为空；密码强度由用户自行设置。
+    if not admin_password:
         raise ValueError(
-            "管理员初始密码至少设置 12 个字符。"
+            "GROK2API_ADMIN_PASSWORD 未设置。"
         )
 
     # ---------- 创建目录 ----------
@@ -207,9 +220,12 @@ def create_config():
     )
 
     os.makedirs(
-        QUALITY_GUARD_DIR,
+        MEDIA_DIR,
         exist_ok=True,
     )
+
+    # Quality Guard 当前关闭，不挂载独立 Volume。
+    # 官方 ENTRYPOINT 启动时会创建并设置该目录权限。
 
     # ---------- 生成配置文件 ----------
     #
@@ -221,8 +237,8 @@ def create_config():
     # 媒体：
     # /app/data/media
     #
-    # 官方 Docker ENTRYPOINT 会将配置文件复制到
-    # /app/config.yaml，再以 grok2api 用户运行程序。
+    # 官方 Docker ENTRYPOINT 会把该配置复制到
+    # /app/config.yaml，再以 UID/GID 10001 运行程序。
 
     config = f"""
 server:
@@ -303,7 +319,9 @@ qualityGuard:
     autoDisable: false
 """
 
-    # 配置文件权限仅允许当前容器用户读取
+    # 配置文件先由 root 创建。
+    # 官方 ENTRYPOINT 会复制到 /app/config.yaml，
+    # 并将目标文件 chown 给 grok2api 用户。
     with open(
         CONFIG_SOURCE_FILE,
         "w",
@@ -323,34 +341,181 @@ qualityGuard:
 
 
 # ============================================================
-#                    Volume 提交
+#             修复 Modal Volume 的目录和文件权限
+# ============================================================
+
+def ensure_volume_permissions():
+    """
+    将 Volume 中的目录和文件所有权调整为官方运行用户：
+    UID 10001 / GID 10001。
+
+    原因：
+    Modal Volume 挂载到 /app/data 后，会覆盖 Docker 镜像
+    原本创建并 chown 的 /app/data 目录。
+
+    因此不能只依赖 Dockerfile 中的 chown；
+    必须在启动官方 ENTRYPOINT 之前处理挂载目录权限。
+    """
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+
+    if os.geteuid() != 0:
+        raise PermissionError(
+            "当前容器不是 root 用户，无法修复 Modal Volume 权限。"
+            f"当前 EUID={os.geteuid()}，"
+            f"需要在启动官方 ENTRYPOINT 前以 root 执行权限修复。"
+        )
+
+    print(
+        "[LOG] 正在检查 Modal Volume 文件权限...",
+        flush=True,
+    )
+
+    changed_count = 0
+
+    # 遍历数据目录，修正目录和文件的 UID/GID。
+    # 仅在发现所有权不正确时执行 chown。
+    for current_root, dir_names, file_names in os.walk(
+        DATA_DIR,
+        topdown=True,
+        followlinks=False,
+    ):
+        paths = [current_root]
+
+        paths.extend(
+            os.path.join(current_root, name)
+            for name in dir_names
+        )
+
+        paths.extend(
+            os.path.join(current_root, name)
+            for name in file_names
+        )
+
+        for path in paths:
+            try:
+                file_stat = os.lstat(path)
+            except FileNotFoundError:
+                # 文件可能在遍历过程中被清理，跳过即可。
+                continue
+
+            if (
+                file_stat.st_uid != APP_UID
+                or file_stat.st_gid != APP_GID
+            ):
+                os.chown(
+                    path,
+                    APP_UID,
+                    APP_GID,
+                    follow_symlinks=False,
+                )
+                changed_count += 1
+
+            # 确保目录所有者具有读、写、执行权限。
+            if stat.S_ISDIR(file_stat.st_mode):
+                current_mode = stat.S_IMODE(file_stat.st_mode)
+                required_mode = (
+                    current_mode
+                    | stat.S_IRUSR
+                    | stat.S_IWUSR
+                    | stat.S_IXUSR
+                )
+
+                if required_mode != current_mode:
+                    os.chmod(path, required_mode)
+
+            # 确保普通文件所有者至少具有读、写权限。
+            elif stat.S_ISREG(file_stat.st_mode):
+                current_mode = stat.S_IMODE(file_stat.st_mode)
+                required_mode = (
+                    current_mode
+                    | stat.S_IRUSR
+                    | stat.S_IWUSR
+                )
+
+                if required_mode != current_mode:
+                    os.chmod(path, required_mode)
+
+    # 再次明确确保关键目录权限。
+    os.chown(
+        DATA_DIR,
+        APP_UID,
+        APP_GID,
+    )
+    os.chown(
+        MEDIA_DIR,
+        APP_UID,
+        APP_GID,
+    )
+
+    os.chmod(DATA_DIR, 0o750)
+    os.chmod(MEDIA_DIR, 0o750)
+
+    # 如果数据库已经存在，确保运行用户可读写。
+    if os.path.exists(DATABASE_FILE):
+        os.chown(
+            DATABASE_FILE,
+            APP_UID,
+            APP_GID,
+        )
+        os.chmod(
+            DATABASE_FILE,
+            0o600,
+        )
+
+    # 检查目录最终所有权。
+    data_stat = os.stat(DATA_DIR)
+    media_stat = os.stat(MEDIA_DIR)
+
+    if (
+        data_stat.st_uid != APP_UID
+        or data_stat.st_gid != APP_GID
+    ):
+        raise PermissionError(
+            f"{DATA_DIR} 所有权修复失败。"
+        )
+
+    if (
+        media_stat.st_uid != APP_UID
+        or media_stat.st_gid != APP_GID
+    ):
+        raise PermissionError(
+            f"{MEDIA_DIR} 所有权修复失败。"
+        )
+
+    print(
+        f"[LOG] Volume 权限检查完成，修正项目数：{changed_count}",
+        flush=True,
+    )
+    print(
+        f"[LOG] {DATA_DIR} 所有者：{APP_UID}:{APP_GID}",
+        flush=True,
+    )
+    print(
+        f"[LOG] {MEDIA_DIR} 所有者：{APP_UID}:{APP_GID}",
+        flush=True,
+    )
+
+
+# ============================================================
+#                    Volume 最终提交
 # ============================================================
 
 def commit_on_exit():
+    """容器正常退出时提交主数据 Volume。"""
 
-    # Modal Volume 支持后台自动提交。
-    # 这里额外在正常退出时执行最终提交，
-    # 不创建每 30 秒运行一次的后台提交线程。
-
-    for volume, name in [
-        (vol, VOLUME_NAME),
-        (quality_vol, QUALITY_VOLUME_NAME),
-    ]:
-
-        try:
-            volume.commit()
-
-            print(
-                f"[LOG] {name} 最终提交成功",
-                flush=True,
-            )
-
-        except Exception as error:
-
-            print(
-                f"[LOG] {name} 最终提交失败：{error}",
-                flush=True,
-            )
+    try:
+        vol.commit()
+        print(
+            f"[LOG] {VOLUME_NAME} 最终提交成功",
+            flush=True,
+        )
+    except Exception as error:
+        print(
+            f"[LOG] {VOLUME_NAME} 最终提交失败：{error}",
+            flush=True,
+        )
 
 
 # ============================================================
@@ -362,30 +527,25 @@ def commit_on_exit():
     cpu=CPU,
     memory=MEMORY_MB,
 
-    # 主数据持久化
+    # SQLite 数据库和媒体文件共用一个 Volume。
     volumes={
         DATA_DIR: vol,
-        QUALITY_GUARD_DIR: quality_vol,
     },
 
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
 
-    # 加载管理员和加密密钥
     secrets=[
         modal.Secret.from_name(SECRET_NAME),
     ],
 )
-
 @modal.concurrent(
     max_inputs=MAX_CONCURRENT_INPUTS
 )
-
 @modal.web_server(
     WEB_PORT,
     startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
 )
-
 def ui():
 
     print("=" * 60, flush=True)
@@ -393,7 +553,7 @@ def ui():
     print("=" * 60, flush=True)
 
     # ========================================================
-    # 1. 检查必要文件
+    # 1. 检查官方程序文件
     # ========================================================
 
     if not os.path.isfile(BINARY_PATH):
@@ -418,14 +578,11 @@ def ui():
     required_secrets = [
         "GROK2API_JWT_SECRET",
         "GROK2API_CREDENTIAL_ENCRYPTION_KEY",
-        "GROK2API_ADMIN_USERNAME",
         "GROK2API_ADMIN_PASSWORD",
     ]
 
     for key in required_secrets:
-
         if not os.environ.get(key, "").strip():
-
             raise ValueError(
                 f"Modal Secret 缺少环境变量：{key}"
             )
@@ -442,18 +599,21 @@ def ui():
     create_config()
 
     # ========================================================
-    # 4. 设置环境变量
+    # 4. 设置运行环境变量
     # ========================================================
 
     env = os.environ.copy()
 
     env["TZ"] = TIMEZONE
-
     env["GROK2API_CONFIG_SOURCE"] = CONFIG_SOURCE_FILE
-
     env["GROK2API_QUALITY_GUARD_DIR"] = QUALITY_GUARD_DIR
-
     env["PYTHONUNBUFFERED"] = "1"
+
+    # ========================================================
+    # 5. 修复 Volume 权限（本次重点修复）
+    # ========================================================
+
+    ensure_volume_permissions()
 
     print(
         "[LOG] 运行环境准备完成",
@@ -461,32 +621,26 @@ def ui():
     )
 
     # ========================================================
-    # 5. 注册退出时 Volume 最终提交
+    # 6. 注册退出时 Volume 最终提交
     # ========================================================
 
-    atexit.register(
-        commit_on_exit
-    )
+    atexit.register(commit_on_exit)
 
     # ========================================================
-    # 6. 启动官方 Docker ENTRYPOINT
+    # 7. 启动官方 Docker ENTRYPOINT
     # ========================================================
     #
-    # 官方 Dockerfile：
-    #
-    # ENTRYPOINT:
-    # /usr/local/bin/grok2api-entrypoint
-    #
-    # CMD:
+    # 官方 Dockerfile 的 CMD：
     # /app/grok2api
     # --config /app/config.yaml
     # --listen 0.0.0.0:8000
     #
-    # ENTRYPOINT 会：
-    # 1. 检查配置文件。
+    # 官方 ENTRYPOINT 会：
+    # 1. 检查配置文件来源。
     # 2. 将配置复制到 /app/config.yaml。
-    # 3. 设置文件权限。
-    # 4. 使用 grok2api 用户启动 Go 程序。
+    # 3. 将配置文件所有权设置为 grok2api 用户。
+    # 4. 设置配置文件权限。
+    # 5. 使用 UID/GID 10001 启动 Go 程序。
 
     command = [
         ENTRYPOINT_PATH,
@@ -516,7 +670,7 @@ def ui():
     )
 
     # ========================================================
-    # 7. 等待 HTTP 健康检查
+    # 8. 等待 HTTP 健康检查
     # ========================================================
 
     health_url = (
@@ -530,18 +684,16 @@ def ui():
         < WEB_STARTUP_TIMEOUT_SECONDS
     ):
 
-        # 检查 Go 进程是否提前退出
+        # Go 进程提前退出，立即显示退出代码。
         exit_code = process.poll()
 
         if exit_code is not None:
-
             raise RuntimeError(
                 "Grok2API 启动失败，"
                 f"进程退出代码：{exit_code}"
             )
 
         try:
-
             request = urllib.request.Request(
                 health_url,
                 headers={
@@ -555,7 +707,6 @@ def ui():
             ) as response:
 
                 if response.status == 200:
-
                     print(
                         "[LOG] HTTP 健康检查通过",
                         flush=True,
@@ -583,23 +734,20 @@ def ui():
             TimeoutError,
             OSError,
         ):
-
             time.sleep(1)
 
     # ========================================================
-    # 8. 启动超时处理
+    # 9. 启动超时处理
     # ========================================================
 
     if process.poll() is None:
-
         process.terminate()
 
         try:
             process.wait(timeout=10)
-
         except subprocess.TimeoutExpired:
-
             process.kill()
+            process.wait(timeout=5)
 
     raise RuntimeError(
         "Grok2API 启动超时，请检查 Modal 容器日志。"
