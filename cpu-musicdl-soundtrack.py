@@ -48,7 +48,7 @@ VOLUME_COMMIT_INTERVAL = 30
 # ---------- 服务安全配置 ----------
 # 使用 Modal Proxy Auth 保护 Web 服务
 # 访问时需要通过 Modal 身份验证
-REQUIRE_MODAL_AUTH = True
+REQUIRE_MODAL_AUTH = False
 
 # ---------- 环境配置 ----------
 PYTHON_VERSION = "3.11"
