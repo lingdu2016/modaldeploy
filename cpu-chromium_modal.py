@@ -563,7 +563,7 @@ def handle_signal(signum, frame):
 @modal.web_server(
     WEB_PORT,
     startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
-    requires_proxy_auth=True,
+    requires_proxy_auth=False,
 )
 def ui():
 
