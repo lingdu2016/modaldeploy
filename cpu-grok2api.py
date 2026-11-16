@@ -1,7 +1,7 @@
 """
 Modal 云端 Chromium（Debian + Xvfb + x11vnc + noVNC）
 
-部署前先创建 Secret（密码至少 8 位；VNC 协议只取前 8 位生效）aa：
+部署前先创建 Secret（密码至少 8 位；VNC 协议只取前 8 位生效：
     modal secret create chromium-secret CHROMIUM_VNC_PASSWORD='你的密码'
 
 部署：
