@@ -10,8 +10,12 @@ import urllib.request
 import urllib.error
 
 import modal
-
-
+################################下面参数需要提前写入modal环境变量中
+# echo "GROK2API_JWT_SECRET=$(openssl rand -hex 32)"
+# echo "GROK2API_CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -base64 32)"
+# echo "GROK2API_ADMIN_USERNAME=admin"
+# echo "GROK2API_ADMIN_PASSWORD=$(openssl rand -base64 24)"  至少12位，下面代码有判断
+###############################################
 # ============================================================
 #                    配置区（集中管理）
 # ============================================================
