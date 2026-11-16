@@ -50,9 +50,10 @@ jobs:
           # modal deploy cpu-slash.py  ##长链接转短链接
           # modal deploy cpu-chatgpt2api.py  ##chatgpt逆向
           # modal deploy cpu-qwen2api.py  ##qwen逆向
-          # modal deploy cpu-rclone.py 
+          # modal deploy cpu-rclone.py
+          modal deploy cpu-grok2api.py
           # modal deploy cpu-omniroute.py
-          modal deploy cpu-musicdl-soundtrack.py
+          # modal deploy cpu-musicdl-soundtrack.py
 
   
 
