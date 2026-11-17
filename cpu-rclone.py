@@ -47,11 +47,12 @@ BACKUP_MEMORY_MB = 512
 BACKUP_TIMEOUT_SECONDS = 21600  # 6 小时
 
 # 备份失败后的自动重试
+# 注意：Modal 要求重试延迟必须在 0-60 秒之间
 BACKUP_MAX_RETRIES = 2
-BACKUP_RETRY_DELAY_SECONDS = 300.0
+BACKUP_RETRY_DELAY_SECONDS = 60.0
 
 # ---------- 自动备份时间 ----------
-BACKUP_CRON = "30 14 * * *"  # 每天北京时间 13:30
+BACKUP_CRON = "30 13 * * *"  # 每天北京时间 13:30
 BACKUP_TIMEZONE = "Asia/Shanghai"
 
 # ---------- Koofr 备份配置 ----------
@@ -378,6 +379,8 @@ def ui():
     retries=modal.Retries(
         max_retries=BACKUP_MAX_RETRIES,
         initial_delay=BACKUP_RETRY_DELAY_SECONDS,
+        backoff_coefficient=1.0,
+        max_delay=60.0,
     ),
     cpu=BACKUP_CPU,
     memory=BACKUP_MEMORY_MB,
