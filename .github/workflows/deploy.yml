@@ -54,7 +54,8 @@ jobs:
           # modal deploy cpu-grok2api.py
           # modal deploy cpu-omniroute.py
           # modal deploy cpu-musicdl-soundtrack.py
-          modal deploy cpu-chromium_modal.py
+          # modal deploy cpu-chromium_modal.py
+          modal deploy cpu-VScode.py
 
   
 
