@@ -52,7 +52,7 @@ BACKUP_MAX_RETRIES = 2
 BACKUP_RETRY_DELAY_SECONDS = 60.0
 
 # ---------- 自动备份时间 ----------
-BACKUP_CRON = "30 13 * * *"  # 每天北京时间 13:30
+BACKUP_CRON = "16 14 * * *"  # 每天北京时间 13:30
 BACKUP_TIMEZONE = "Asia/Shanghai"
 
 # ---------- Koofr 备份配置 ----------
