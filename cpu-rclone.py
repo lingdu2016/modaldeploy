@@ -49,7 +49,7 @@ vol = modal.Volume.from_name(
 
 
 # ====================================================
-# 2. 官方镜像 + 安装 Python（参考 Slash 写法）
+# 2. 官方镜像 + 安装 Python（是参考 Slash 写法）
 # ====================================================
 # 官方 rclone 镜像基于 Alpine
 # 用 setup_dockerfile_commands 安装 python3，避免 add_python 在 musl 上检测失败
