@@ -155,7 +155,7 @@ BACKUP_MAX_RETRIES = 3
 BACKUP_RETRY_DELAY_SECONDS = 60.0
 
 # 每天自动备份的时间。cron 格式：分 时 日 月 星期
-BACKUP_CRON = "11 16 * * *"
+BACKUP_CRON = "31 1 * * *"
 BACKUP_TIMEZONE = "Asia/Shanghai"
 
 # 并发传输数量
