@@ -53,6 +53,14 @@ vol = modal.Volume.from_name(
 image = (
     modal.Image.from_registry(IMAGE, add_python="3.12")
     .entrypoint([])
+    # 构建期安装的软件会写进镜像层，重启后依然存在（终端里 apt install 的不会）
+    .apt_install("curl", "unzip", "jq", "git-lfs")
+    # 通过 NodeSource 官方源安装 Node.js（20.x 已于 2026-04 结束维护，这里用 22.x）
+    .run_commands(
+        "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+        "apt-get install -y nodejs",
+        "node --version && npm --version",
+    )
 )
 
 app = modal.App(
