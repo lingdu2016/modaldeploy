@@ -15,18 +15,17 @@ import modal
 # ============================================================
 # Modal 环境变量（在创建 Secret 时设置）
 # ============================================================
-# GROK2API_JWT_SECRET
-#   openssl rand -hex 32
-#
-# GROK2API_CREDENTIAL_ENCRYPTION_KEY
-#   openssl rand -base64 32
-#
-# GROK2API_ADMIN_USERNAME
-#   admin
-#
+"""
+# Modal 环境变量生成命令（复制到终端执行）
+
+echo "GROK2API_JWT_SECRET=$(openssl rand -hex 32)"
+echo "GROK2API_CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -base64 32)"
+echo "GROK2API_ADMIN_USERNAME=admin"
+echo "GROK2API_ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
+"""
+
 # GROK2API_ADMIN_PASSWORD
-#   设置一个强密码。官方示例没有规定必须至少 12 个字符，
-#   本部署代码不再额外设置 12 位长度限制。
+#   设置一个强密码。官方示例没有规定必须至少 12 个字符，本部署代码不再额外设置 12 位长度限制。
 #
 # Secret 名称：grok2api-secret
 # ============================================================
