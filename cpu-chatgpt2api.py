@@ -1,327 +1,182 @@
-
 import os
-import time
 import subprocess
-import urllib.request
-import urllib.error
-
+import time
 import modal
 
-
 # ====================== 配置区（所有可调参数都在这里） ======================
+APP_NAME = "chatgpt2api"
+VOLUME_NAME = "chatgpt2api-data"
 
-# ---------- Modal 应用 ----------
-APP_NAME = "yangyu-qwen2api"
+# 建议固定版本，避免 :latest 变了导致镜像层重建
+# 可到 https://github.com/yukkcat/chatgpt2api/pkgs/container/chatgpt2api 看最新 tag
+IMAGE = "ghcr.io/yukkcat/chatgpt2api:latest"   # 或改成你需要的 tag；不要用 latest 更稳
+WEB_PORT = 80
 
-# ---------- 官方 Docker 镜像 ----------
-# 对应官方仓库当前 main 分支的提交版本
-IMAGE = "yujunzhixue/qwen2api:sha-799e975"
-
-# ---------- 持久化存储 ----------
-# 只使用一个 Volume
-VOLUME_NAME = "qwen2api-data"
-
-# Volume 挂载到项目默认数据目录
-VOLUME_MOUNT_PATH = "/app/data"
-
-# 数据和日志共用一个 Volume
-DATA_DIR = "/app/data"
-LOGS_DIR = "/app/data/logs"
-
-# ---------- Secret ----------
-# 使用你已经创建的 Secret
-SECRET_NAME = "qwen2api-secret"
-
-# ---------- 服务配置 ----------
-WEB_PORT = 7860
-HEALTH_URL = f"http://127.0.0.1:{WEB_PORT}/healthz"
-
-# ---------- Qwen2API 运行配置 ----------
-WORKERS = 1
-BROWSER_POOL_SIZE = 1
-LOG_LEVEL = "INFO"
-
-# ---------- Modal 资源配置 ----------
-CPU = 1.0
-MEMORY = 2048
-
-# 限制最多一个容器，避免多个实例同时修改同一个数据 Volume
 MAX_CONTAINERS = 1
+MAX_CONCURRENT_INPUTS = 8
+TIMEOUT_SECONDS = 3600
+SCALEDOWN_WINDOW_SECONDS = 300
+WEB_STARTUP_TIMEOUT_SECONDS = 180
 
-# ---------- 容器运行配置 ----------
-TIMEOUT = 3600
-SCALEDOWN_WINDOW = 300
-STARTUP_TIMEOUT = 300
+CPU = 0.5
+MEMORY_MB = 1536
 
-# ---------- 健康检查 ----------
-STARTUP_CHECK_TIMEOUT = 240
-STARTUP_CHECK_INTERVAL = 2
-HEALTH_CHECK_REQUEST_TIMEOUT = 5
-
-
-# ====================== Modal 初始化 ======================
-
-app = modal.App(APP_NAME)
+SECRET_NAME = "chatgpt2api-secret"
+# ====================================================
 
 
-# ====================== Docker 镜像配置 ======================
-
-# 使用项目官方 Docker Hub 镜像
-#
-# 官方镜像基于 Debian Bookworm slim
-# 已经包含：
-# 1. Qwen2API Go 后端程序
-# 2. React 前端构建文件
-# 3. 浏览器运行依赖
-# 4. Playwright 浏览器
-#
-# add_python 仅为 Modal 提供 Python 运行环境
-# 不会替换官方 Go 程序
-image = modal.Image.from_registry(
-    IMAGE,
-    add_python="3.11",
-)
-
-
-# ====================== 持久化 Volume ======================
-
-# 创建或引用一个 Modal Volume
-#
-# Volume 挂载到 /app/data
-#
-# 目录结构：
-# /app/data/
-# ├── accounts.json
-# ├── api_keys.json
-# └── logs/
-#
-# 实际文件以程序运行后生成的内容为准
-volume = modal.Volume.from_name(
+# ====================================================
+# 1. 持久化数据卷（只存业务数据，不存运行时代码）
+# ====================================================
+vol = modal.Volume.from_name(
     VOLUME_NAME,
     create_if_missing=True,
 )
 
-
-# ====================== Secret 配置 ======================
-
-# 引用已经创建的 qwen2api-secret
-#
-# 官方项目必需的环境变量：
-# ADMIN_KEY
-#
-# 不设置 API_KEY
-# 不将 ADMIN_KEY 改名为 API_KEY
-qwen2api_secret = modal.Secret.from_name(
-    SECRET_NAME,
-    required_keys=["ADMIN_KEY"],
+# ====================================================
+# 2. 镜像：官方镜像 + 构建期预热 /app（真正的镜像缓存）
+# ====================================================
+# 构建时做一次和 entrypoint 相同的 seed + uv sync，
+# 结果写进镜像层；之后冷启动直接用缓存，不再每次装 32 个包。
+image = (
+    modal.Image.from_registry(IMAGE)
+    # 避免官方 ENTRYPOINT 干扰 Modal 自己的 Python 启动
+    .entrypoint([])
+    .run_commands(
+        # 与官方 docker-entrypoint.sh 对齐：把种子拷到 /app 并同步依赖
+        "set -eu; "
+        "seed_root=/opt/chatgpt2api; "
+        "runtime_root=/app; "
+        "seed_version=$(tr -d '\\r\\n' < \"${seed_root}/VERSION\"); "
+        "mkdir -p \"${runtime_root}\"; "
+        # 清空 /app 里除 data 外的内容（构建时一般没有 data）
+        "find \"${runtime_root}\" -mindepth 1 -maxdepth 1 "
+        "! -name data -exec rm -rf -- {} + 2>/dev/null || true; "
+        # 拷贝种子（跳过 .venv，依赖后面 uv sync 生成）
+        "for source in \"${seed_root}\"/* \"${seed_root}\"/.[!.]* \"${seed_root}\"/..?*; do "
+        "  [ -e \"$source\" ] || continue; "
+        "  [ \"$(basename \"$source\")\" = \".venv\" ] && continue; "
+        "  cp -a \"$source\" \"${runtime_root}/\"; "
+        "done; "
+        "printf '%s\\n' \"${seed_version}\" > \"${runtime_root}/.chatgpt2api-image-version\"; "
+        "cd \"${runtime_root}\"; "
+        "uv sync --frozen --no-dev --no-install-project; "
+        # 把项目本身也装进 venv，避免运行时 uv run 再 Building/Installed
+        "uv pip install --no-deps -e . || uv pip install --no-deps .; "
+        "echo \"[modal-image] /app prewarm done, version=${seed_version}\"",
+    )
 )
 
-
-# ====================== 服务启动 ======================
-
-@app.function(
+app = modal.App(
+    name=APP_NAME,
     image=image,
+)
 
-    # ---------- CPU 和内存 ----------
-    cpu=CPU,
-    memory=MEMORY,
-
-    # ---------- 容器运行时间 ----------
-    timeout=TIMEOUT,
-    scaledown_window=SCALEDOWN_WINDOW,
-    startup_timeout=STARTUP_TIMEOUT,
-
-    # ---------- 容器数量 ----------
+# ====================================================
+# 3. 启动 chatgpt2api
+# ====================================================
+@app.function(
     max_containers=MAX_CONTAINERS,
-
-    # ---------- 持久化目录 ----------
-    volumes={
-        VOLUME_MOUNT_PATH: volume,
-    },
-
-    # ---------- 环境变量 ----------
+    cpu=CPU,
+    memory=MEMORY_MB,
+    volumes={"/app/data": vol},
+    timeout=TIMEOUT_SECONDS,
+    scaledown_window=SCALEDOWN_WINDOW_SECONDS,
     secrets=[
-        qwen2api_secret,
+        modal.Secret.from_name(SECRET_NAME),
     ],
 )
-@modal.web_server(
-    port=WEB_PORT,
-    startup_timeout=STARTUP_TIMEOUT,
-    requires_proxy_auth=False,
+@modal.concurrent(
+    max_inputs=MAX_CONCURRENT_INPUTS,
 )
-def run_qwen2api():
+@modal.web_server(
+    WEB_PORT,
+    startup_timeout=WEB_STARTUP_TIMEOUT_SECONDS,
+)
+def ui():
+    """启动 chatgpt2api Web 服务。"""
+    print("======================================", flush=True)
+    print("正在启动 chatgpt2api...", flush=True)
+    print("======================================", flush=True)
 
-    # ====================== 1. 检查环境变量 ======================
+    auth_key = os.environ.get("CHATGPT2API_AUTH_KEY", "").strip()
+    base_url = os.environ.get("CHATGPT2API_BASE_URL", "").strip()
+    thread_tokens = os.environ.get("CHATGPT2API_THREAD_TOKENS", "40").strip()
 
-    # 从 qwen2api-secret 中读取 ADMIN_KEY
-    admin_key = os.environ.get("ADMIN_KEY", "").strip()
-
-    if not admin_key:
-        raise RuntimeError(
-            f"缺少 ADMIN_KEY，请检查 Modal Secret：{SECRET_NAME}"
+    if not auth_key:
+        raise ValueError(
+            "CHATGPT2API_AUTH_KEY 未设置。官方要求必填，请在 Modal Secret 中配置。"
         )
 
-    print("ADMIN_KEY 环境变量检查通过")
-
-    # 不打印密钥，避免敏感信息进入日志
-
-
-    # ====================== 2. 检查官方启动程序 ======================
-
-    # 官方 Dockerfile 指定的启动程序
-    executable = "/usr/local/bin/qwen2api"
-
-    if not os.path.isfile(executable):
-        raise RuntimeError(
-            f"找不到官方启动程序：{executable}"
+    if base_url and not (
+        base_url.startswith("http://") or base_url.startswith("https://")
+    ):
+        raise ValueError(
+            "CHATGPT2API_BASE_URL 若填写，须是完整 http(s) 地址。"
         )
 
-    if not os.access(executable, os.X_OK):
-        raise RuntimeError(
-            f"启动程序没有执行权限：{executable}"
-        )
-
-    print("官方启动程序检查通过")
-
-
-    # ====================== 3. 创建数据和日志目录 ======================
-
-    # 数据目录位于 Volume 挂载位置
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    # 日志目录放在同一个 Volume 内
-    os.makedirs(LOGS_DIR, exist_ok=True)
-
-    print("持久化目录检查通过")
-    print(f"数据目录：{DATA_DIR}")
-    print(f"日志目录：{LOGS_DIR}")
-
-
-    # ====================== 4. 设置项目环境变量 ======================
-
-    # 继承 Secret 注入的环境变量
-    # QWEN_ACCOUNT_N、QWEN_API_KEY 等可选变量也会保留
     env = os.environ.copy()
+    env["CHATGPT2API_AUTH_KEY"] = auth_key
+    env["CHATGPT2API_THREAD_TOKENS"] = thread_tokens
+    env["TZ"] = os.environ.get("TZ", "Asia/Shanghai")
+    env["DATABASE_URL"] = "sqlite:////app/data/chatgpt2api.db"
 
-    # 设置官方项目支持的运行参数
-    env.update({
-        # Web 服务端口
-        "PORT": str(WEB_PORT),
+    if base_url:
+        env["CHATGPT2API_BASE_URL"] = base_url
+    else:
+        env.pop("CHATGPT2API_BASE_URL", None)
 
-        # 后端 Worker 数量
-        "WORKERS": str(WORKERS),
-
-        # 浏览器池大小
-        "BROWSER_POOL_SIZE": str(BROWSER_POOL_SIZE),
-
-        # 日志等级
-        "LOG_LEVEL": LOG_LEVEL,
-
-        # 项目数据目录
-        "DATA_DIR": DATA_DIR,
-
-        # 项目日志目录
-        "LOGS_DIR": LOGS_DIR,
-    })
-
-
-    # ====================== 5. 输出启动信息 ======================
-
-    print("")
-    print("==========================================")
-    print("             Qwen2API 启动")
-    print("==========================================")
-    print(f"应用名称：{APP_NAME}")
-    print(f"官方镜像：{IMAGE}")
-    print(f"服务端口：{WEB_PORT}")
-    print(f"CPU：{CPU}")
-    print(f"内存：{MEMORY} MB")
-    print(f"最大容器数：{MAX_CONTAINERS}")
-    print(f"Secret：{SECRET_NAME}")
-    print(f"Volume：{VOLUME_NAME}")
-    print(f"数据目录：{DATA_DIR}")
-    print(f"日志目录：{LOGS_DIR}")
-    print(f"Workers：{WORKERS}")
-    print(f"浏览器池：{BROWSER_POOL_SIZE}")
-    print("==========================================")
-    print("")
-
-
-    # ====================== 6. 启动 Go 后端 ======================
-
-    # 直接启动官方 Dockerfile 中的 Go 程序
-    #
-    # stdout 和 stderr 继承容器输出
-    # 可以直接在 Modal Logs 中查看项目日志
-    process = subprocess.Popen(
-        [executable],
-        cwd="/app",
-        env=env,
-        stdout=None,
-        stderr=None,
+    print("AUTH_KEY：已设置", flush=True)
+    print(
+        f"BASE_URL：{base_url if base_url else '(未设置，使用当前服务地址)'}",
+        flush=True,
     )
+    print(f"THREAD_TOKENS：{thread_tokens}", flush=True)
+    print(f"DATABASE_URL：{env['DATABASE_URL']}", flush=True)
+    print("数据目录：/app/data", flush=True)
+    print(f"监听端口：{WEB_PORT}", flush=True)
+    print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
 
-    print("Qwen2API 进程已经启动")
-    print(f"进程 PID：{process.pid}")
+    # 优先用镜像里已预热的 venv，避免 uv run 再次装包/构建
+    uvicorn_bin = "/app/.venv/bin/uvicorn"
+    if os.path.isfile(uvicorn_bin):
+        cmd = [
+            uvicorn_bin,
+            "main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(WEB_PORT),
+            "--access-log",
+        ]
+        cwd = "/app"
+        print("启动方式：预热 venv 直接 uvicorn（跳过运行时 uv sync）", flush=True)
+    else:
+        # 回退：走官方 entrypoint（仍会 uv sync，但镜像已预热时通常很快）
+        cmd = [
+            "chatgpt2api-entrypoint",
+            "uv",
+            "run",
+            "uvicorn",
+            "main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(WEB_PORT),
+            "--access-log",
+        ]
+        cwd = None
+        print("启动方式：官方 entrypoint（回退）", flush=True)
 
+    process = subprocess.Popen(cmd, env=env, cwd=cwd)
 
-    # ====================== 7. 等待健康检查 ======================
+    print(f"进程已启动，PID：{process.pid}", flush=True)
 
-    start_time = time.time()
+    time.sleep(3)
+    return_code = process.poll()
+    if return_code is not None:
+        raise RuntimeError(
+            f"chatgpt2api 启动失败，退出代码：{return_code}"
+        )
 
-    while time.time() - start_time < STARTUP_CHECK_TIMEOUT:
-
-        # 检查 Go 服务是否意外退出
-        return_code = process.poll()
-
-        if return_code is not None:
-            raise RuntimeError(
-                f"Qwen2API 启动失败，"
-                f"进程退出代码：{return_code}"
-            )
-
-        try:
-            # 请求官方健康检查接口
-            request = urllib.request.Request(
-                HEALTH_URL,
-                method="GET",
-            )
-
-            with urllib.request.urlopen(
-                request,
-                timeout=HEALTH_CHECK_REQUEST_TIMEOUT,
-            ) as response:
-
-                if 200 <= response.status < 300:
-
-                    print("")
-                    print("==========================================")
-                    print("          Qwen2API 启动成功")
-                    print("==========================================")
-                    print(f"健康检查：{HEALTH_URL}")
-                    print(f"HTTP 状态码：{response.status}")
-                    print("服务已经就绪")
-                    print("==========================================")
-                    print("")
-
-                    return
-
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            OSError,
-        ):
-            # 服务尚未就绪，继续等待
-            pass
-
-        time.sleep(STARTUP_CHECK_INTERVAL)
-
-
-    # ====================== 8. 启动超时处理 ======================
-
-    # 超时后终止启动流程
-    raise RuntimeError(
-        f"Qwen2API 启动超时，"
-        f"等待 {STARTUP_CHECK_TIMEOUT} 秒后，"
-        f"健康检查仍未通过：{HEALTH_URL}"
-    )
+    print("进程仍在运行，等待 Web 服务就绪。", flush=True)
