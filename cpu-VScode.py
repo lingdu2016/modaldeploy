@@ -13,13 +13,12 @@ VOLUME_NAME = "code-server-data"
 IMAGE = "ghcr.io/coder/code-server:latest"
 WEB_PORT = 8080                       # 官方镜像默认监听 8080
 
-# 官方镜像的用户目录。官方 Docker 部署要持久化的三处：
-#   /home/coder/.local   扩展、用户数据
-#   /home/coder/.config  config.yaml
-#   /home/coder/project  项目代码
-# 这里把整个 /home/coder 挂载为一个 Volume，一次性全部持久化。
-HOME_DIR = "/home/coder"
-WORKSPACE_DIR = f"{HOME_DIR}/project"
+# 官方 Docker 部署要持久化的三处：.local（扩展、用户数据）、.config（config.yaml）、project（代码）。
+# 注意：Modal 不允许把 Volume 挂到非空目录，而镜像里的 /home/coder 非空，
+# 所以 Volume 挂在空目录 /data，并把 HOME 指向 /data/home，三处依然全部持久化。
+DATA_DIR = "/data"
+HOME_DIR = f"{DATA_DIR}/home"
+WORKSPACE_DIR = f"{DATA_DIR}/project"
 
 MAX_CONTAINERS = 1
 MAX_CONCURRENT_INPUTS = 100           # code-server 依赖 WebSocket 长连接
@@ -27,8 +26,8 @@ TIMEOUT_SECONDS = 6 * 3600            # 单个容器最长存活时间（Modal �
 SCALEDOWN_WINDOW_SECONDS = 600
 WEB_STARTUP_TIMEOUT_SECONDS = 120
 
-CPU = 1                             # 官方 TL;DR：1 GB 内存 + 2 vCPU 起步
-MEMORY_MB = 1024
+CPU = 2.0                             # 官方 TL;DR：1 GB 内存 + 2 vCPU 起步
+MEMORY_MB = 4096
 
 # Secret 中需要有 PASSWORD（明文）或 HASHED_PASSWORD（SHA-256 / argon2 哈希）之一
 SECRET_NAME = "code-server-secret"
@@ -69,7 +68,7 @@ app = modal.App(
     max_containers=MAX_CONTAINERS,
     cpu=CPU,
     memory=MEMORY_MB,
-    volumes={HOME_DIR: vol},
+    volumes={DATA_DIR: vol},
     timeout=TIMEOUT_SECONDS,
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
     secrets=[
@@ -102,7 +101,7 @@ def ui():
     config_dir = f"{HOME_DIR}/.config/code-server"
     user_data_dir = f"{HOME_DIR}/.local/share/code-server"
     extensions_dir = f"{user_data_dir}/extensions"
-    for d in (config_dir, extensions_dir, WORKSPACE_DIR):
+    for d in (HOME_DIR, config_dir, extensions_dir, WORKSPACE_DIR):
         os.makedirs(d, exist_ok=True)
 
     env = os.environ.copy()
