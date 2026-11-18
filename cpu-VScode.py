@@ -22,12 +22,12 @@ WORKSPACE_DIR = f"{DATA_DIR}/project"
 
 MAX_CONTAINERS = 1
 MAX_CONCURRENT_INPUTS = 100           # code-server 依赖 WebSocket 长连接
-TIMEOUT_SECONDS = 6 * 3600            # 单个容器最长存活时间（Modal 上限 24h）
-SCALEDOWN_WINDOW_SECONDS = 600
+TIMEOUT_SECONDS = 1 * 3600            # 单个容器最长存活时间（Modal 上限 24h）
+SCALEDOWN_WINDOW_SECONDS = 300
 WEB_STARTUP_TIMEOUT_SECONDS = 120
 
-CPU = 2.0                             # 官方 TL;DR：1 GB 内存 + 2 vCPU 起步
-MEMORY_MB = 4096
+CPU = 0.5                             # 官方 TL;DR：1 GB 内存 + 2 vCPU 起步
+MEMORY_MB = 1024
 
 # Secret 中需要有 PASSWORD（明文）或 HASHED_PASSWORD（SHA-256 / argon2 哈希）之一
 SECRET_NAME = "code-server-secret"
