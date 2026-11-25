@@ -50,12 +50,13 @@ jobs:
           # modal deploy cpu-slash.py  ##长链接转短链接
           # modal deploy cpu-chatgpt2api.py  ##chatgpt逆向
           # modal deploy cpu-qwen2api.py  ##qwen逆向
-          # modal deploy cpu-rclone.py
-          # modal deploy cpu-grok2api.py
-          # modal deploy cpu-omniroute.py
-          # modal deploy cpu-musicdl-soundtrack.py
-          # modal deploy cpu-chromium_modal.py
-          modal deploy cpu-VScode.py
+          # modal deploy cpu-rclone.py    ##定时同步
+          # modal deploy cpu-grok2api.py  ##grok2api逆向
+          # modal deploy cpu-omniroute.py ##api路由
+          # modal deploy cpu-musicdl-soundtrack.py  ##歌曲下载
+          # modal deploy cpu-chromium_modal.py      ##浏览器
+          # modal deploy cpu-VScode.py   ##网页终端
+            modal deploy cpu-s2.py       ##对象存储
 
   
 
