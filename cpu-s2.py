@@ -18,7 +18,9 @@ S2_INSTALL_TARGET = "github.com/mojatter/s2/cmd/s2-server@latest"
 # ---------- 对外暴露哪个服务（Modal 一个函数只能暴露一个端口） ----------
 #   "console" -> Web 控制台（浏览器登录，查看桶和文件，用来检查账号密码是否正确）
 #   "s3"      -> S3 API（OpenList / aws cli / SDK 连接用）
-EXPOSE = "console"
+# 下面的二选一
+# EXPOSE = "console"    
+EXPOSE = "s3"
 
 # S2 内部端口（一般不用改）
 S3_PORT = 9000
