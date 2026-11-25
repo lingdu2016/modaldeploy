@@ -27,7 +27,7 @@ S3_PORT = 9000
 CONSOLE_PORT = 9001
 
 # ---------- 启动时自动创建的 bucket（逗号分隔） ----------
-# 已存在的不会重复创建；删除这里的名字不会删除已有的桶
+# 已存在的不会重复创建；删除这里的名字不会删除已有的桶,只能用英文
 S2_BUCKETS = "assets,upload"
 
 # S2 数据目录（挂载 Volume）
@@ -36,11 +36,11 @@ DATA_DIR = "/var/lib/s2"
 MAX_CONTAINERS = 1          # osfs 存本地文件，必须单实例，避免多实例写冲突
 MAX_CONCURRENT_INPUTS = 16
 TIMEOUT_SECONDS = 3600
-SCALEDOWN_WINDOW_SECONDS = 300
+SCALEDOWN_WINDOW_SECONDS = 180
 WEB_STARTUP_TIMEOUT_SECONDS = 120
 
-CPU = 0.25
-MEMORY_MB = 256
+CPU = 0.125
+MEMORY_MB = 128
 
 # Volume 自动提交间隔（秒），防止容器回收时丢数据
 VOLUME_COMMIT_INTERVAL_SECONDS = 30
