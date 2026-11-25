@@ -10,23 +10,23 @@ APP_NAME = "s2"
 VOLUME_NAME = "s2-data"
 
 # 编译 s2-server 用的 Go 镜像（s2 最新版要求 Go >= 1.26）
-# 如果这个 tag 拉取失败，可改回 golang:1.24-bookworm，
-# 配合下面的 GOTOOLCHAIN=auto 同样能自动下载 1.26 工具链
 GO_IMAGE = "golang:1.26-bookworm"
 
 # 想固定版本：把 @latest 改成具体 tag，例如 @v0.37.0
 S2_INSTALL_TARGET = "github.com/mojatter/s2/cmd/s2-server@latest"
 
-# S2 有两个端口：
-#   S3_PORT      = S3 API（aws cli / boto3 / 各种 SDK 连这个）
-#   CONSOLE_PORT = Web 控制台（浏览器管理 bucket 和文件）
+# ---------- 对外暴露哪个服务（Modal 一个函数只能暴露一个端口） ----------
+#   "console" -> Web 控制台（浏览器登录，查看桶和文件，用来检查账号密码是否正确）
+#   "s3"      -> S3 API（OpenList / aws cli / SDK 连接用）
+EXPOSE = "console"
+
+# S2 内部端口（一般不用改）
 S3_PORT = 9000
 CONSOLE_PORT = 9001
 
-# Modal 一个函数只能对外暴露一个端口，二选一：
-#   S3_PORT      -> 对外提供 S3 API（默认）
-#   CONSOLE_PORT -> 对外提供 Web 控制台
-WEB_PORT = S3_PORT
+# ---------- 启动时自动创建的 bucket（逗号分隔） ----------
+# 已存在的不会重复创建；删除这里的名字不会删除已有的桶
+S2_BUCKETS = "assets,upload"
 
 # S2 数据目录（挂载 Volume）
 DATA_DIR = "/var/lib/s2"
@@ -43,12 +43,15 @@ MEMORY_MB = 256
 # Volume 自动提交间隔（秒），防止容器回收时丢数据
 VOLUME_COMMIT_INTERVAL_SECONDS = 30
 
-# Modal Secret 名称，里面需要包含：
-#   S2_SERVER_USER       （必填）S3 Access Key / 控制台用户名
-#   S2_SERVER_PASSWORD   （必填）S3 Secret Key / 控制台密码
-#   S2_SERVER_BUCKETS    （选填）启动时自动创建的 bucket，逗号分隔，如 assets,uploads
+# Modal Secret 名称，里面只需要两项：
+#   S2_SERVER_USER       S3 Access Key / 控制台用户名
+#   S2_SERVER_PASSWORD   S3 Secret Key / 控制台密码
 SECRET_NAME = "s2-secret"
 # ====================================================
+
+
+# 根据 EXPOSE 决定对外暴露的端口
+WEB_PORT = CONSOLE_PORT if EXPOSE == "console" else S3_PORT
 
 
 # ====================================================
@@ -123,7 +126,6 @@ def ui():
     # ---------- 读取并检查 Secret ----------
     s2_user = os.environ.get("S2_SERVER_USER", "").strip()
     s2_password = os.environ.get("S2_SERVER_PASSWORD", "").strip()
-    s2_buckets = os.environ.get("S2_SERVER_BUCKETS", "").strip()
 
     # 不设账号密码 S2 会关闭认证，等于公网公开，所以这里强制要求
     if not s2_user or not s2_password:
@@ -143,14 +145,11 @@ def ui():
     env["S2_SERVER_ROOT"] = DATA_DIR                      # 数据根目录
     env["S2_SERVER_USER"] = s2_user
     env["S2_SERVER_PASSWORD"] = s2_password
+    env["S2_SERVER_BUCKETS"] = S2_BUCKETS                 # 启动时自动创建的桶
 
-    if s2_buckets:
-        env["S2_SERVER_BUCKETS"] = s2_buckets
-    else:
-        env.pop("S2_SERVER_BUCKETS", None)
-
-    print("USER / PASSWORD：已设置", flush=True)
-    print(f"BUCKETS：{s2_buckets if s2_buckets else '(未设置，不自动创建)'}", flush=True)
+    print(f"当前模式：{EXPOSE}（{'Web 控制台' if EXPOSE == 'console' else 'S3 API'}）", flush=True)
+    print(f"用户名：{s2_user}（长度 {len(s2_user)}），密码长度：{len(s2_password)}", flush=True)
+    print(f"BUCKETS：{S2_BUCKETS}", flush=True)
     print(f"数据目录：{DATA_DIR}", flush=True)
     print(f"S3 API 端口：{S3_PORT}", flush=True)
     print(f"Web 控制台端口：{CONSOLE_PORT}", flush=True)
