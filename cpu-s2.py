@@ -9,9 +9,12 @@ import modal
 APP_NAME = "s2"
 VOLUME_NAME = "s2-data"
 
-# 编译 s2-server 用的 Go 镜像（官方镜像基础层不确定，所以自己编译）
-# 想固定版本：把下面的 @latest 改成具体 tag，例如 @v0.18.2
-GO_IMAGE = "golang:1.24-bookworm"
+# 编译 s2-server 用的 Go 镜像（s2 最新版要求 Go >= 1.26）
+# 如果这个 tag 拉取失败，可改回 golang:1.24-bookworm，
+# 配合下面的 GOTOOLCHAIN=auto 同样能自动下载 1.26 工具链
+GO_IMAGE = "golang:1.26-bookworm"
+
+# 想固定版本：把 @latest 改成具体 tag，例如 @v0.37.0
 S2_INSTALL_TARGET = "github.com/mojatter/s2/cmd/s2-server@latest"
 
 # S2 有两个端口：
@@ -61,8 +64,10 @@ vol = modal.Volume.from_name(
 # ====================================================
 # 编译结果写进镜像层，冷启动时不用重新编译。
 # add_python 是为了让 Modal 能在这个镜像里运行 Python 函数。
+# GOTOOLCHAIN=auto：s2 要求的 Go 版本比镜像高时，自动下载匹配的工具链
 image = (
     modal.Image.from_registry(GO_IMAGE, add_python="3.12")
+    .env({"GOTOOLCHAIN": "auto"})
     .run_commands(
         f"go install {S2_INSTALL_TARGET}",
         "cp /go/bin/s2-server /usr/local/bin/s2-server",
@@ -132,10 +137,10 @@ def ui():
     # ---------- 配置环境变量（S2 通过环境变量配置） ----------
     env = os.environ.copy()
     env["TZ"] = os.environ.get("TZ", "Asia/Shanghai")
-    env["S2_SERVER_LISTEN"] = f":{S3_PORT}"             # S3 API 监听地址
+    env["S2_SERVER_LISTEN"] = f":{S3_PORT}"               # S3 API 监听地址
     env["S2_SERVER_CONSOLE_LISTEN"] = f":{CONSOLE_PORT}"  # Web 控制台监听地址
-    env["S2_SERVER_TYPE"] = "osfs"                       # 存储后端：本地文件系统
-    env["S2_SERVER_ROOT"] = DATA_DIR                     # 数据根目录
+    env["S2_SERVER_TYPE"] = "osfs"                        # 存储后端：本地文件系统
+    env["S2_SERVER_ROOT"] = DATA_DIR                      # 数据根目录
     env["S2_SERVER_USER"] = s2_user
     env["S2_SERVER_PASSWORD"] = s2_password
 
