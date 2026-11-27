@@ -51,8 +51,8 @@ TIMEOUT_SECONDS = 3600
 SCALEDOWN_WINDOW_SECONDS = 180
 WEB_STARTUP_TIMEOUT_SECONDS = 180
 
-CPU = 0.5
-MEMORY_MB = 512
+CPU = 0.25
+MEMORY_MB = 256
 
 # 提交本项目 Volume / 刷新其他 Volume 的间隔（秒）
 VOLUME_COMMIT_INTERVAL_SECONDS = 30
@@ -211,6 +211,7 @@ def ui():
     env["RCLONE_MANAGER_CACHE_DIR"] = CACHE_DIR
     env["RCLONE_MANAGER_INSTALLATION_TYPE"] = "docker"
     env["RCLONE_CONFIG"] = f"{CONFIG_DIR}/rclone.conf"
+    env["RCLONE_LOCAL_COPY_LINKS"] = "true"   # 让 rclone 的 Local 后端跟随符号链接，/mnt 下才能看到各 Volume
 
     print(f"二进制：{SERVER_BINARY_PATH}", flush=True)
     print(f"用户名：{user}（长度 {len(user)}），密码长度：{len(password)}", flush=True)
