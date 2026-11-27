@@ -57,7 +57,8 @@ jobs:
           # modal deploy cpu-chromium_modal.py      ##浏览器
           # modal deploy cpu-VScode.py   ##网页终端
           # modal deploy cpu-s2.py       ##对象存储
-            modal deploy cpu-webdav.py
+          # modal deploy cpu-webdav.py   ##webdav存储
+            modal deploy cpu-rclone-manager.py 
 
   
 
