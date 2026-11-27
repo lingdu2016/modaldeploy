@@ -8,7 +8,7 @@ import threading
 import time
 import modal
 
-# ====================== 配置区（所有可调参数都在这里） =====================
+# ====================== 配置区（所有可调参数都在这里） ======================
 APP_NAME = "immich"
 
 # 两个 Volume（都不要删）：
@@ -73,7 +73,7 @@ EXIT_WAIT_IMMICH = 15
 EXIT_WAIT_REDIS = 15
 EXIT_WAIT_PG = 30
 
-CPU = 4
+CPU = 2
 MEMORY_MB = 4096
 
 # Volume 自动提交间隔（秒）
@@ -400,6 +400,24 @@ def save_postgres_snapshot():
     print(f"数据库整体快照已保存，耗时 {time.monotonic() - started:.1f} 秒", flush=True)
 
 
+def find_start_script():
+    """定位 Immich 的启动脚本。v3 在 /usr/src/app/server/bin，旧版本在 /usr/src/app/bin。"""
+    candidates = [
+        "/usr/src/app/server/bin/start.sh",
+        "/usr/src/app/bin/start.sh",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    found = shutil.which("start.sh")
+    if found:
+        return found
+    raise RuntimeError(
+        "找不到 Immich 的 start.sh，已尝试：" + "、".join(candidates)
+        + "。请在镜像里执行 find / -name start.sh 确认实际路径。"
+    )
+
+
 # ====================================================
 # 5. 启动 Postgres + Valkey/Redis + immich-server
 # ====================================================
@@ -498,15 +516,17 @@ class Immich:
         env["REDIS_PORT"] = str(REDIS_PORT)
         env["IMMICH_MEDIA_LOCATION"] = DATA_DIR
         env["IMMICH_PORT"] = str(SERVER_PORT)
-        env["PATH"] = env.get("PATH", "") + ":/usr/src/app/bin"
+        env["PATH"] = env.get("PATH", "") + ":/usr/src/app/server/bin:/usr/src/app/bin"
 
         print(f"数据库：127.0.0.1:{PG_PORT}/{db_name}（用户 {db_user}）", flush=True)
         print(f"机器学习地址：{env.get('IMMICH_MACHINE_LEARNING_URL', '(未设置，请在管理后台配置)')}", flush=True)
         print(f"存储模式：{STORAGE_MODE}，媒体目录：{DATA_DIR}", flush=True)
         print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
 
+        start_script = find_start_script()
+        print(f"Immich 启动脚本：{start_script}", flush=True)
         self.immich_process = subprocess.Popen(
-            ["/bin/bash", "/usr/src/app/bin/start.sh"],
+            ["/bin/bash", start_script],
             env=env,
             cwd="/usr/src/app",
         )
