@@ -8,7 +8,7 @@ import socket
 import modal
 
 # =============================================================================
-# SeaweedFS on Modal —— 服务端加密版（SSE-S3，主密钥来自 Modal Secret）
+# SeaweedFS on Modal —— 服务端加密版（SSE-S3，主密钥来自 Modal Secret）mysse
 #
 # 目标：只拿到 Modal Volume 的人看不到文件内容；只有通过本服务（S3 接口，
 #       且 Secret 里的主密钥正确）才能读出明文。
@@ -76,11 +76,10 @@ else:
 #   - Filer 能直接上传和删除文件；我推断通过 Filer 上传不经过 S3 层、不会触发 SSE，
 #     文件可能以明文写进 Volume（没实测）。所以用 filer 模式时只看、不要往里传文件。
 #   - 用完请改回 "s3" 并重新部署，让公网地址恢复到只有 S3。
-# EXPOSE = "s3"
-EXPOSE = "master"
+EXPOSE = "s3"
+# EXPOSE = "filer"         
+# EXPOSE = "master"            
 
-# 开启 filer / master 前必须手动把它改成 True，防止不小心把无登录页面部署到公网。
-ALLOW_UNAUTHENTICATED_UI = True
 
 # SeaweedFS 各组件的默认端口（一般不用改）
 S3_PORT = 8333
