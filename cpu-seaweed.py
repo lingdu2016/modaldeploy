@@ -17,7 +17,8 @@ import modal
 #   1. 主密钥放 Modal Secret，容器启动时以环境变量 WEED_S3_SSE_KEY 注入，不写入 Volume。
 #   2. 启动后给每个桶设置"默认加密 AES256"，客户端不带加密头也会被加密。
 #   3. 启动后自检：上传不带加密头的测试对象，确认服务端标记为 AES256，否则拒绝服务。
-#   4. 只对外暴露 S3 端口；Filer / Master 不暴露。
+#   4. 默认只对外暴露 S3 端口。可用 EXPOSE 临时切到 filer / master 查看数据，
+#      但这两个页面没有登录，且 Filer 上传不经过 S3 层、可能绕过加密，见配置区说明。
 #   5. 写成类：enter 里启动 weed，exit 里先让 weed 正常退出，再提交 Volume。
 #
 # 【第一次部署，我没能验证、需要你看构建和日志的地方】
@@ -57,7 +58,7 @@ DEBIAN_BASE_IMAGE = "debian:bookworm-slim"
 #             确认后再把这里改成那个版本对应的标签固定下来。
 #   具体标签：我不确定 Release 标签是 "4.55.0" 还是 "4.55" 这种格式，
 #             写错会 404，构建报错时请到 GitHub Releases 页面核对。
-BINARY_TAG = "4.55"
+BINARY_TAG = "latest"
 if BINARY_TAG == "latest":
     DOWNLOAD_URL = "https://github.com/seaweedfs/seaweedfs/releases/latest/download/linux_amd64.tar.gz"
 else:
@@ -65,9 +66,36 @@ else:
         f"https://github.com/seaweedfs/seaweedfs/releases/download/{BINARY_TAG}/linux_amd64.tar.gz"
     )
 
-# 只对外暴露 S3 API 端口（Modal 一个函数只能暴露一个端口）
+# ---------- 对外暴露哪个服务（Modal 一个函数只能暴露一个端口） ----------
+#   "s3"     -> S3 API（日常使用，有凭据认证 + 默认加密）          【默认，平时就用这个】
+#   "filer"  -> Filer 网页/HTTP（浏览文件、检查数据）
+#   "master" -> Master 网页（集群状态、volume 信息）
+#
+# 【filer / master 的风险，请看清楚再开】
+#   - 这两个端口没有登录，知道地址的人都能访问。
+#   - Filer 能直接上传和删除文件；我推断通过 Filer 上传不经过 S3 层、不会触发 SSE，
+#     文件可能以明文写进 Volume（没实测）。所以用 filer 模式时只看、不要往里传文件。
+#   - 用完请改回 "s3" 并重新部署，让公网地址恢复到只有 S3。
+# EXPOSE = "s3"
+EXPOSE = "filer"
+
+# 开启 filer / master 前必须手动把它改成 True，防止不小心把无登录页面部署到公网。
+ALLOW_UNAUTHENTICATED_UI = True
+
+# SeaweedFS 各组件的默认端口（一般不用改）
 S3_PORT = 8333
-WEB_PORT = S3_PORT
+FILER_PORT = 8888
+MASTER_PORT = 9333
+
+PORT_MAP = {"s3": S3_PORT, "filer": FILER_PORT, "master": MASTER_PORT}
+if EXPOSE not in PORT_MAP:
+    raise ValueError(f"EXPOSE 只能是 {list(PORT_MAP)}，当前为 {EXPOSE!r}")
+if EXPOSE != "s3" and not ALLOW_UNAUTHENTICATED_UI:
+    raise ValueError(
+        f"EXPOSE={EXPOSE!r} 会把没有登录的页面暴露到公网。"
+        "确认要开启，请先把 ALLOW_UNAUTHENTICATED_UI 改成 True；平时请用 EXPOSE = 's3'。"
+    )
+WEB_PORT = PORT_MAP[EXPOSE]
 
 # ---------- 启动时自动创建的 bucket（逗号分隔） ----------
 # 桶名规则：3-63 位，只能用小写字母、数字、连字符
@@ -91,8 +119,8 @@ SCALEDOWN_WINDOW_SECONDS = 180
 STARTUP_TIMEOUT_SECONDS = 300       # 容器启动（含建桶、自检）的时间上限
 WEB_STARTUP_TIMEOUT_SECONDS = 120   # 等待对外端口可用的时间上限
 
-CPU = 0.25
-MEMORY_MB = 256             # 我估计的值，没实测；部署后看 Modal 面板里的实际占用再调
+CPU = 0.5
+MEMORY_MB = 512             # 我估计的值，没实测；部署后看 Modal 面板里的实际占用再调
 
 # Volume 自动提交间隔（秒）
 VOLUME_COMMIT_INTERVAL_SECONDS = 30
@@ -334,7 +362,9 @@ class SeaweedFS:
         print(f"SSE 主密钥长度：{len(sse_key)}（来自 Secret，不落盘）", flush=True)
         print(f"BUCKETS：{buckets}", flush=True)
         print(f"数据目录：{WEED_DIR}", flush=True)
-        print(f"对外暴露端口：{WEB_PORT}（仅 S3）", flush=True)
+        print(f"对外暴露：{EXPOSE}（端口 {WEB_PORT}）", flush=True)
+        if EXPOSE != "s3":
+            print("警告：当前对外暴露的是无登录页面，只用来查看，用完请改回 EXPOSE = 's3'。", flush=True)
         print(f"CPU：{CPU} / 内存：{MEMORY_MB} MB", flush=True)
 
         # ---------- 启动 weed server ----------
