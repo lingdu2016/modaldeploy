@@ -57,7 +57,7 @@ DEBIAN_BASE_IMAGE = "debian:bookworm-slim"
 #             确认后再把这里改成那个版本对应的标签固定下来。
 #   具体标签：我不确定 Release 标签是 "4.55.0" 还是 "4.55" 这种格式，
 #             写错会 404，构建报错时请到 GitHub Releases 页面核对。
-BINARY_TAG = "latest"
+BINARY_TAG = "4.55"
 if BINARY_TAG == "latest":
     DOWNLOAD_URL = "https://github.com/seaweedfs/seaweedfs/releases/latest/download/linux_amd64.tar.gz"
 else:
@@ -91,8 +91,8 @@ SCALEDOWN_WINDOW_SECONDS = 180
 STARTUP_TIMEOUT_SECONDS = 300       # 容器启动（含建桶、自检）的时间上限
 WEB_STARTUP_TIMEOUT_SECONDS = 120   # 等待对外端口可用的时间上限
 
-CPU = 0.5
-MEMORY_MB = 512             # 我估计的值，没实测；部署后看 Modal 面板里的实际占用再调
+CPU = 0.25
+MEMORY_MB = 256             # 我估计的值，没实测；部署后看 Modal 面板里的实际占用再调
 
 # Volume 自动提交间隔（秒）
 VOLUME_COMMIT_INTERVAL_SECONDS = 30
