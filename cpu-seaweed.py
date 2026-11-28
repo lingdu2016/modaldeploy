@@ -77,7 +77,7 @@ else:
 #     文件可能以明文写进 Volume（没实测）。所以用 filer 模式时只看、不要往里传文件。
 #   - 用完请改回 "s3" 并重新部署，让公网地址恢复到只有 S3。
 # EXPOSE = "s3"
-EXPOSE = "filer"
+EXPOSE = "master"
 
 # 开启 filer / master 前必须手动把它改成 True，防止不小心把无登录页面部署到公网。
 ALLOW_UNAUTHENTICATED_UI = True
@@ -119,8 +119,8 @@ SCALEDOWN_WINDOW_SECONDS = 180
 STARTUP_TIMEOUT_SECONDS = 300       # 容器启动（含建桶、自检）的时间上限
 WEB_STARTUP_TIMEOUT_SECONDS = 120   # 等待对外端口可用的时间上限
 
-CPU = 0.5
-MEMORY_MB = 512             # 我估计的值，没实测；部署后看 Modal 面板里的实际占用再调
+CPU = 0.25
+MEMORY_MB = 300             # 我估计的值，没实测；部署后看 Modal 面板里的实际占用再调
 
 # Volume 自动提交间隔（秒）
 VOLUME_COMMIT_INTERVAL_SECONDS = 30
