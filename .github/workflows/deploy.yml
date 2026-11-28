@@ -59,7 +59,8 @@ jobs:
           # modal deploy cpu-s2.py       ##对象存储
           # modal deploy cpu-webdav.py   ##webdav存储
           # modal deploy cpu-rclone-manager.py 
-            modal deploy cpu-immich.py
+          # modal deploy cpu-immich.py   相册
+            modal deploy cpu-seaweed.py
 
   
 
