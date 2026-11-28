@@ -21,8 +21,11 @@ import modal
 #   5. 写成类：enter 里启动 weed，exit 里先让 weed 正常退出，再提交 Volume。
 #
 # 【第一次部署，我没能验证、需要你看构建和日志的地方】
-#   A) 官方镜像是 Alpine。Modal 的 add_python 在 Alpine 上能否安装，我没查到。
-#      如果构建报错（找不到 python / 动态库错误等），把 IMAGE_SOURCE 改成 "debian" 重新部署。
+#   A) 官方镜像 ghcr.io/seaweedfs/seaweedfs:4.55.0 在 Modal 构建的第 0 步就失败：
+#      "parsing skopeo inspect config: skopeo inspect returned non-zero status"。
+#      这发生在 add_python 之前，是 Modal 读取该镜像配置时出错，原因我不清楚，
+#      所以 Alpine 能否配合 add_python 这个问题仍然没有答案。
+#      现在默认用 IMAGE_SOURCE="debian"（下载官方预编译二进制）。
 #   B) 官方镜像的入口脚本我没看到内容，这里用 .entrypoint([]) 清掉，避免它拦截 Modal 的启动命令。
 #   C) weed server 的参数只用了官方文档出现过的：-dir -ip.bind -filer -s3
 #      -volume.max -master.volumeSizeLimitMB，端口全部用默认值。
@@ -39,7 +42,7 @@ VOLUME_NAME = "seaweedfs-data"
 # 镜像来源：
 #   "official" -> 官方镜像 ghcr.io/seaweedfs/seaweedfs:<版本>（Alpine）
 #   "debian"   -> Debian 基础镜像 + 下载官方预编译二进制（official 构建失败时用）
-IMAGE_SOURCE = "official"
+IMAGE_SOURCE = "debian"   # 官方镜像在 Modal 的 skopeo 检查步骤就失败了（见文件开头说明），改用 debian
 
 # 固定版本，不用 latest（SSE 相关代码更新频繁，新版本可能改变行为）
 SEAWEED_VERSION = "4.55.0"
@@ -48,9 +51,19 @@ OFFICIAL_IMAGE = f"ghcr.io/seaweedfs/seaweedfs:{SEAWEED_VERSION}"
 # 仅 IMAGE_SOURCE="debian" 时使用。下载地址里的标签格式和资产名是我凭印象写的，
 # 构建报错请到 GitHub Releases 核对。
 DEBIAN_BASE_IMAGE = "debian:bookworm-slim"
-DOWNLOAD_URL = (
-    f"https://github.com/seaweedfs/seaweedfs/releases/download/{SEAWEED_VERSION}/linux_amd64.tar.gz"
-)
+
+# 二进制下载用的 Release 标签。
+#   "latest"：先用它保证能构建成功。构建日志里 `weed version` 会打印实际版本号，
+#             确认后再把这里改成那个版本对应的标签固定下来。
+#   具体标签：我不确定 Release 标签是 "4.55.0" 还是 "4.55" 这种格式，
+#             写错会 404，构建报错时请到 GitHub Releases 页面核对。
+BINARY_TAG = "latest"
+if BINARY_TAG == "latest":
+    DOWNLOAD_URL = "https://github.com/seaweedfs/seaweedfs/releases/latest/download/linux_amd64.tar.gz"
+else:
+    DOWNLOAD_URL = (
+        f"https://github.com/seaweedfs/seaweedfs/releases/download/{BINARY_TAG}/linux_amd64.tar.gz"
+    )
 
 # 只对外暴露 S3 API 端口（Modal 一个函数只能暴露一个端口）
 S3_PORT = 8333
@@ -121,7 +134,7 @@ elif IMAGE_SOURCE == "debian":
         .apt_install("curl", "ca-certificates", "tzdata")
         .run_commands(
             f"curl -fsSL {DOWNLOAD_URL} -o /tmp/weed.tar.gz",
-            "tar -xzf /tmp/weed.tar.gz -C /usr/local/bin weed",
+            "tar -xzf /tmp/weed.tar.gz -C /usr/local/bin",
             "chmod +x /usr/local/bin/weed",
             "rm /tmp/weed.tar.gz",
             "weed version",
